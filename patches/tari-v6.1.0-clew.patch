@@ -1,5 +1,5 @@
 diff --git a/base_layer/wallet_ffi/Cargo.toml b/base_layer/wallet_ffi/Cargo.toml
-index aeaf153..cf6d6ae 100644
+index aeaf153..ea200fc 100644
 --- a/base_layer/wallet_ffi/Cargo.toml
 +++ b/base_layer/wallet_ffi/Cargo.toml
 @@ -21,6 +21,7 @@ tari_shutdown = { workspace = true }
@@ -10,6 +10,15 @@ index aeaf153..cf6d6ae 100644
  tari_transaction_key_manager = { workspace = true }
  
  chacha20poly1305 = "0.10.1"
+@@ -46,7 +47,7 @@ serde_json = { workspace = true }
+ openssl = { version = "0.10.80", features = ["vendored"] }
+ 
+ [lib]
+-crate-type = ["staticlib", "cdylib"]
++crate-type = ["staticlib", "cdylib", "rlib"]
+ 
+ [dev-dependencies]
+ tari_transaction_key_manager = { workspace = true }
 diff --git a/base_layer/wallet_ffi/src/lib.rs b/base_layer/wallet_ffi/src/lib.rs
 index afe0661..b61d122 100644
 --- a/base_layer/wallet_ffi/src/lib.rs

@@ -1,0 +1,57 @@
+[package]
+name = "clew_core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Clew's wallet library: Tari's L1 wallet FFI plus the Ootle (L2) client, in one static library"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# L1: Tari's wallet C FFI, re-exported as is (with Clew's patch applied by scripts/build-ffi.sh).
+minotari_wallet_ffi = { path = "../../vendor/tari/base_layer/wallet_ffi" }
+# The L1 wallet itself, for burning to Ootle (the FFI has no burn).
+minotari_wallet = { path = "../../vendor/tari/base_layer/wallet" }
+tari_sidechain = "6.1.0"
+tari_transaction_components = "6.1.0"
+# L2: the Ootle client.
+ootle-rs = { path = "../../vendor/tari-ootle/crates/wallet/ootle-rs" }
+tari_ootle_wallet_sdk = { path = "../../vendor/tari-ootle/crates/wallet/sdk" }
+tari_ootle_wallet_sdk_services = { path = "../../vendor/tari-ootle/crates/wallet/sdk_services", features = ["indexer_client"] }
+tari_ootle_wallet_storage_sqlite = { path = "../../vendor/tari-ootle/crates/wallet/storage_sqlite" }
+ootle-network = { path = "../../vendor/tari-ootle/crates/ootle_network" }
+tari_engine_types = { path = "../../vendor/tari-ootle/crates/engine_types" }
+tari_template_lib = { path = "../../vendor/tari-ootle/crates/template_lib" }
+tari_template_lib_types = { path = "../../vendor/tari-ootle/crates/template_lib_types" }
+# Without the engine (as Ootle's wallet daemon takes it): genesis resources and the L1 burn proof conversion.
+tari_ootle_app_utilities = { path = "../../vendor/tari-ootle/applications/tari_ootle_app_utilities", default-features = false }
+tari_ootle_common_types = { path = "../../vendor/tari-ootle/crates/common_types" }
+tari_ootle_transaction = { path = "../../vendor/tari-ootle/crates/transaction" }
+ootle_byte_type = { path = "../../vendor/tari-ootle/crates/ootle_byte_type" }
+rand = "0.10"
+zeroize = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tari_indexer_client = { path = "../../vendor/tari-ootle/clients/tari_indexer_client", features = ["client"] }
+tari_common_types = "6.1.0"
+tari_crypto = "0.24"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+anyhow = "1"
+url = "2"
+libc = "0.2"
+# The Ootle SDK pulls in OpenSSL (via webauthn-rs, used by its wallet daemon's passkey login). Build
+# it from source into the library so the app never links a system or Homebrew copy.
+openssl = { version = "0.10", features = ["vendored"] }
+
+# Ootle depends on Tari's L1 crates from crates.io; use the exact copies the L1 wallet is built from.
+[patch.crates-io]
+tari_common = { path = "../../vendor/tari/common" }
+tari_common_types = { path = "../../vendor/tari/base_layer/common_types" }
+tari_sidechain = { path = "../../vendor/tari/base_layer/sidechain" }
+tari_transaction_components = { path = "../../vendor/tari/base_layer/transaction_components" }
+tari_hashing = { path = "../../vendor/tari/hashing" }
+tari_shutdown = { path = "../../vendor/tari/infrastructure/shutdown" }
+
+[profile.release]
+lto = false

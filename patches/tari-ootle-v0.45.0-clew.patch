@@ -1,0 +1,109 @@
+diff --git a/clients/tari_indexer_client/Cargo.toml b/clients/tari_indexer_client/Cargo.toml
+index d31b08d..cbd9762 100644
+--- a/clients/tari_indexer_client/Cargo.toml
++++ b/clients/tari_indexer_client/Cargo.toml
+@@ -21,7 +21,7 @@ ootle_serde = { workspace = true, features = ["std"] }
+ bytes = { workspace = true, optional = true }
+ bounded-vec = { workspace = true }
+ log = { workspace = true }
+-reqwest = { workspace = true, features = ["json", "stream"], optional = true }
++reqwest = { workspace = true, features = ["json", "stream", "socks"], optional = true }
+ serde = { workspace = true, default-features = true, features = ["rc"] }
+ serde_json = { workspace = true }
+ thiserror = { workspace = true, optional = true }
+diff --git a/clients/tari_indexer_client/src/graphql_client.rs b/clients/tari_indexer_client/src/graphql_client.rs
+index 40efe42..3baeca3 100644
+--- a/clients/tari_indexer_client/src/graphql_client.rs
++++ b/clients/tari_indexer_client/src/graphql_client.rs
+@@ -34,13 +34,12 @@ pub struct IndexerGraphQLClient {
+ 
+ impl IndexerGraphQLClient {
+     pub fn connect<T: IntoUrl>(endpoint: T) -> Result<Self, anyhow::Error> {
+-        let client = reqwest::Client::builder()
+-            .default_headers({
+-                let mut headers = HeaderMap::with_capacity(1);
+-                headers.insert(header::CONTENT_TYPE, "applications/json".parse().unwrap());
+-                headers
+-            })
+-            .build()?;
++        let client = crate::proxy::apply(reqwest::Client::builder().default_headers({
++            let mut headers = HeaderMap::with_capacity(1);
++            headers.insert(header::CONTENT_TYPE, "applications/json".parse().unwrap());
++            headers
++        }))
++        .build()?;
+ 
+         Ok(Self {
+             client,
+diff --git a/clients/tari_indexer_client/src/lib.rs b/clients/tari_indexer_client/src/lib.rs
+index 7994d3d..2cd9f09 100644
+--- a/clients/tari_indexer_client/src/lib.rs
++++ b/clients/tari_indexer_client/src/lib.rs
+@@ -29,6 +29,8 @@ pub mod protobuf;
+ #[cfg(feature = "client")]
+ pub mod protobuf_stream;
+ #[cfg(feature = "client")]
++pub mod proxy;
++#[cfg(feature = "client")]
+ pub mod rest_api_client;
+ #[cfg(feature = "client")]
+ pub mod sse;
+diff --git a/clients/tari_indexer_client/src/proxy.rs b/clients/tari_indexer_client/src/proxy.rs
+new file mode 100644
+index 0000000..a225ea1
+--- /dev/null
++++ b/clients/tari_indexer_client/src/proxy.rs
+@@ -0,0 +1,40 @@
++// Copyright 2026 The Tari Project
++// SPDX-License-Identifier: BSD-3-Clause
++
++//! A process-wide proxy for indexer connections, so a host app can route them through Tor.
++
++use std::{sync::RwLock, time::Duration};
++
++/// Proxy for indexer clients, e.g. `socks5h://127.0.0.1:9150` for Tor. `None` connects directly.
++static HTTP_PROXY: RwLock<Option<String>> = RwLock::new(None);
++
++/// Routes indexer clients created after this call through `proxy` (or directly when `None`).
++/// Clients keep the route they were created with, so reconnect after changing it. With a proxy
++/// set, requests that can't reach it fail rather than connecting directly.
++pub fn set_http_proxy(proxy: Option<String>) -> Result<(), reqwest::Error> {
++    if let Some(proxy) = &proxy {
++        reqwest::Proxy::all(proxy)?;
++    }
++    *HTTP_PROXY.write().unwrap_or_else(|e| e.into_inner()) = proxy;
++    Ok(())
++}
++
++/// Connecting through a proxy includes the proxy's own work (for Tor, building a circuit), so it
++/// gets longer than a direct connection would.
++const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
++
++/// Applies the configured proxy to a client builder. If the setting can't be read, uses a dead
++/// proxy: fail closed rather than connect directly. Call it after any `connect_timeout`.
++pub(crate) fn apply(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
++    let proxy = HTTP_PROXY
++        .read()
++        .map(|p| p.clone())
++        .unwrap_or_else(|_| Some("socks5h://127.0.0.1:1".to_string()));
++    match proxy {
++        // Validated in set_http_proxy; an explicit proxy also turns off system proxy detection.
++        Some(proxy) => builder
++            .proxy(reqwest::Proxy::all(proxy).expect("validated in set_http_proxy"))
++            .connect_timeout(PROXY_CONNECT_TIMEOUT),
++        None => builder,
++    }
++}
+diff --git a/clients/tari_indexer_client/src/rest_api_client.rs b/clients/tari_indexer_client/src/rest_api_client.rs
+index fc9daac..98633b4 100644
+--- a/clients/tari_indexer_client/src/rest_api_client.rs
++++ b/clients/tari_indexer_client/src/rest_api_client.rs
+@@ -113,7 +113,7 @@ impl IndexerRestApiClient {
+             client_builder
+         };
+ 
+-        let client = client_builder.build()?;
++        let client = crate::proxy::apply(client_builder).build()?;
+ 
+         let (endpoint, _) = watch::channel(endpoint.into_url()?);
+         Ok(Self {
