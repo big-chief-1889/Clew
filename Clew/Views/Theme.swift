@@ -6,6 +6,9 @@ enum Theme {
     static let surface = Color(red: 0.169, green: 0.169, blue: 0.180)      // #2B2B2E
     static let cardTop = Color(red: 0.91, green: 0.31, blue: 0.56)
     static let cardBottom = Color(red: 0.56, green: 0.08, blue: 0.31)
+    // TARI (Ootle) card: violet, so it can't be mistaken for the XTM card at a glance.
+    static let tariCardTop = Color(red: 0.55, green: 0.36, blue: 0.90)
+    static let tariCardBottom = Color(red: 0.28, green: 0.12, blue: 0.56)
 }
 
 /// The window background: graphite with a faint pink glow from the top.

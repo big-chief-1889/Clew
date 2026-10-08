@@ -100,7 +100,8 @@ pub struct OotleWallet {
 
 impl OotleWallet {
     /// Opens (or creates) the Ootle wallet in `directory` for `seed`, the L1 wallet's seed.
-    pub fn open(seed: &CipherSeed, directory: &Path, network: Network, indexer: Url, password: &str) -> anyhow::Result<Self> {
+    pub fn open(l1_seed: &CipherSeed, directory: &Path, network: Network, indexer: Url, password: &str) -> anyhow::Result<Self> {
+        let seed = &seed_for_network(l1_seed, network)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("clew-ootle")
@@ -261,6 +262,10 @@ impl OotleWallet {
                 None => Ok(finalised.final_fee),
                 Some(RejectReason::ExecutionFailure { message, .. }) if message.contains("Duplicate NFT token id") => {
                     anyhow::bail!("This wallet has already claimed its free test TARI.")
+                },
+                // The faucet records a claim before paying it out, so this comes after the check above.
+                Some(RejectReason::ExecutionFailure { message, .. }) if message.contains("insufficient") => {
+                    anyhow::bail!("The testnet faucet has run out of free TARI for now. Try again later.")
                 },
                 Some(RejectReason::FailedToLockOutputs(r) | RejectReason::FailedToLockInputs(r))
                     if r.contains("is already UP and conflicts with an existing output") =>
@@ -456,6 +461,39 @@ struct HistoryEntry {
     time: i64,
 }
 
+/// The seed the Ootle wallet uses on `network`. On mainnet it is the L1 wallet's seed, as in Tari's
+/// own wallets, so the 24 words restore it anywhere. Ootle's keys don't depend on the network, so on a
+/// test network it is a separate seed derived one-way from it: testnet activity then shares no key or
+/// account address with the real account.
+fn seed_for_network(seed: &CipherSeed, network: Network) -> anyhow::Result<CipherSeed> {
+    use blake2::{Blake2b512, Digest};
+    if network == Network::MainNet {
+        return Ok(seed.clone());
+    }
+    let digest = Zeroizing::new(
+        Blake2b512::new()
+            .chain_update(b"clew.ootle.test_network_seed.v1")
+            .chain_update([network.as_byte()])
+            .chain_update(seed.entropy())
+            .finalize(),
+    );
+    // CipherSeed can only be built from its parts through serde. 2 is Tari's current seed version.
+    #[derive(serde::Serialize)]
+    struct Parts<'a> {
+        version: u8,
+        birthday: u16,
+        entropy: &'a [u8],
+        salt: &'a [u8],
+    }
+    let json = Zeroizing::new(serde_json::to_vec(&Parts {
+        version: 2,
+        birthday: seed.birthday(),
+        entropy: &digest[..16],
+        salt: &digest[16..21],
+    })?);
+    Ok(serde_json::from_slice(&json)?)
+}
+
 /// Waits until `transaction` is finalised and, if it was accepted, until the account monitor has seen
 /// the change to `account`, so balances read afterwards include it. Mirrors Ootle's wallet daemon.
 async fn wait_for_account_update(
@@ -487,5 +525,25 @@ async fn wait_for_account_update(
 impl Drop for OotleWallet {
     fn drop(&mut self) {
         self.shutdown.trigger();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_seed_is_separate_and_stable() {
+        let seed = CipherSeed::random();
+        let test = seed_for_network(&seed, Network::Esmeralda).unwrap();
+        assert_ne!(test.entropy(), seed.entropy());
+        assert_eq!(test.birthday(), seed.birthday());
+        assert_eq!(seed_for_network(&seed, Network::Esmeralda).unwrap(), test);
+        assert_ne!(seed_for_network(&seed, Network::Igor).unwrap(), test);
+        assert_eq!(seed_for_network(&seed, Network::MainNet).unwrap(), seed);
+
+        // The SDK stores the seed through its 24 words.
+        let words = test.to_mnemonic(MnemonicLanguage::English, None).unwrap();
+        assert_eq!(CipherSeed::from_mnemonic(&words, None).unwrap(), test);
     }
 }

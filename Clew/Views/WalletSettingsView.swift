@@ -81,6 +81,16 @@ struct WalletSettingsView: View {
                 }
 
                 Section {
+                    Toggle("Show TARI (Ootle testnet)", isOn: .init(
+                        get: { model.showOotle },
+                        set: { model.setShowOotle($0) }))
+                } header: {
+                    Text("Ootle, Tari's layer 2 (all wallets)")
+                } footer: {
+                    Text("Adds an XTM | TARI switch to each wallet. Ootle isn't live yet, so this is its testnet: test TARI with no value. It uses separate test keys made from your recovery words, so nothing done here links to your real Ootle account later. While it's off, nothing Ootle-related runs or connects.")
+                }
+
+                Section {
                     TextField("Node URL", text: $nodeText)
                         .labelsHidden()
                         .font(.system(.body, design: .monospaced))

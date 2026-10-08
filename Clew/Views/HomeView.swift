@@ -7,9 +7,17 @@ struct HomeView: View {
     @State private var askingNewest = false
     @State private var askingEarlier = false
     @State private var earlierPasswordWallet: WalletProfile?
+    @State private var asset = Asset.xtm
+
+    enum Asset: String, CaseIterable, Identifiable {
+        case xtm = "XTM", tari = "TARI"
+        var id: Self { self }
+    }
+
+    private var showingTari: Bool { asset == .tari && model.showOotle }
 
     enum Sheet: Identifiable {
-        case send, receive, settings, add(AddWalletSheet.Mode), detail(WalletTransaction)
+        case send, receive, settings, add(AddWalletSheet.Mode), detail(WalletTransaction), tariSend, tariReceive
         var id: String {
             if case .detail(let tx) = self { return "detail-\(tx.id)" }
             return String(describing: self)
@@ -57,22 +65,11 @@ struct HomeView: View {
     private var content: some View {
         VStack(spacing: 0) {
             topBar
-            // Switching wallets slides the old card out and the new one in.
-            ZStack {
-                BalanceCard()
-                    .id(model.activeID)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .trailing).combined(with: .opacity),
-                        removal: .move(edge: .leading).combined(with: .opacity)))
+            if showingTari {
+                TariSide(open: { sheet = $0 })
+            } else {
+                xtmSide
             }
-            .padding(.horizontal, 20)
-            .animation(.smooth(duration: 0.45), value: model.activeID)
-            actions
-                .padding(.horizontal, 20)
-                .padding(.top, 14)
-            if let wallet = model.activeWallet, !wallet.backedUp { backupReminder }
-            history
-                .padding(.top, 12)
         }
         .sheet(item: $sheet) { sheet in
             Group {
@@ -82,16 +79,47 @@ struct HomeView: View {
                 case .settings: WalletSettingsView()
                 case .add(let mode): AddWalletSheet(mode: mode)
                 case .detail(let tx): TransactionDetailView(tx: tx)
+                case .tariSend: TariSendView()
+                case .tariReceive: TariReceiveView()
                 }
             }
             .presentationBackground(Theme.background)
         }
     }
 
+    @ViewBuilder private var xtmSide: some View {
+        // Switching wallets slides the old card out and the new one in.
+        ZStack {
+            BalanceCard()
+                .id(model.activeID)
+                .transition(.asymmetric(
+                    insertion: .move(edge: .trailing).combined(with: .opacity),
+                    removal: .move(edge: .leading).combined(with: .opacity)))
+        }
+        .padding(.horizontal, 20)
+        .animation(.smooth(duration: 0.45), value: model.activeID)
+        actions
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+        if let wallet = model.activeWallet, !wallet.backedUp { backupReminder }
+        history
+            .padding(.top, 12)
+    }
+
     private var topBar: some View {
         HStack(spacing: 8) {
             WalletSidebarButton { showingWallets = true }
             Spacer()
+            if model.showOotle {
+                Picker("Currency", selection: $asset) {
+                    ForEach(Asset.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 130)
+                .help("XTM on Tari's main chain, or TARI on Ootle (testnet)")
+                Spacer()
+            }
             IconButton(systemImage: model.hideBalance ? "eye.slash" : "eye",
                        help: model.hideBalance ? "Show balances" : "Hide balances") {
                 model.hideBalance.toggle()
@@ -229,15 +257,8 @@ struct BalanceCard: View {
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background {
-            ZStack {
-                LinearGradient(colors: [Theme.cardTop, Theme.cardBottom],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
-                YarnPattern()
-                LinearGradient(colors: [.white.opacity(0.16), .clear],
-                               startPoint: .topLeading, endPoint: .center)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 18))
-            .shadow(color: Color.accentColor.opacity(pulse ? 0.7 : 0.3), radius: pulse ? 24 : 12, y: 6)
+            CardBackground(top: Theme.cardTop, bottom: Theme.cardBottom)
+                .shadow(color: Color.accentColor.opacity(pulse ? 0.7 : 0.3), radius: pulse ? 24 : 12, y: 6)
         }
         .scaleEffect(pulse ? 1.025 : 1)
         .animation(.default, value: model.balance)
@@ -258,6 +279,21 @@ struct BalanceCard: View {
         Label(text, systemImage: icon)
             .font(.caption.weight(.medium))
             .opacity(0.85)
+    }
+}
+
+/// The gradient, yarn pattern and sheen behind a balance card.
+struct CardBackground: View {
+    let top: Color
+    let bottom: Color
+
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [top, bottom], startPoint: .topLeading, endPoint: .bottomTrailing)
+            YarnPattern()
+            LinearGradient(colors: [.white.opacity(0.16), .clear], startPoint: .topLeading, endPoint: .center)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 18))
     }
 }
 

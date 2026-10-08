@@ -69,6 +69,10 @@ enum Config {
     static let network = "$APP_NETWORK"
     static let defaultNodeURL = "$NODE_URL"
     static let isTestnet = $IS_TESTNET
+    // Ootle (Tari's layer 2) has no mainnet yet, so both builds use its testnet.
+    static let ootleNetwork = "esmeralda"
+    static let ootleIndexerURL = "https://ootle-indexer-a.tari.com/"
+    static let ootleAddressPrefix = "otl_esm_1"
 }
 EOF
 echo "Built $NETWORK wallet library -> $OUT"

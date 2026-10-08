@@ -39,6 +39,21 @@ final class AppModel {
     }
     let tor = TorService()
 
+    /// Show the TARI side of each wallet, on Ootle's testnet (all wallets). Off: Ootle isn't opened
+    /// and nothing of it connects.
+    private(set) var showOotle: Bool {
+        didSet { UserDefaults.standard.set(showOotle, forKey: "showOotleTestnet") }
+    }
+    enum OotleState: Equatable { case off, opening, ready, failed(String) }
+    private(set) var ootleState: OotleState = .off
+    private(set) var tariBalance: MicroTari = 0
+    private(set) var tariHistory: [OotleEntry] = []
+    private(set) var ootleAddress = ""
+    /// Whether the last check with the network worked (nil before the first one finishes).
+    private(set) var ootleOnline: Bool?
+    /// A TARI action (claim, send) is in progress.
+    private(set) var ootleBusy = false
+
     var activeWallet: WalletProfile? { wallets.first { $0.id == activeID } }
 
     /// Every wallet still uses a Keychain key (made before passwords): the lock screen offers the
@@ -63,6 +78,17 @@ final class AppModel {
     /// wallets by a shared exit address.
     private var proxyWalletID: UUID?
 
+    private var ootle: OotleCore?
+    /// The wallet the Ootle wallet belongs to.
+    private var ootleWalletID: UUID?
+    /// Bumped whenever the Ootle wallet closes, so results from an older one are dropped.
+    private var ootleGeneration = 0
+    /// The proxy route the open Ootle wallet was opened with (it keeps it until reopened).
+    private var ootleRoute: String?
+    /// The route currently set for new Ootle connections.
+    private var currentOotleRoute: String?
+    private var ootlePoller: Task<Void, Never>?
+
     /// Thrown when a lock interrupts an operation. Not an error worth showing.
     private struct Interrupted: Error {}
 
@@ -70,6 +96,7 @@ final class AppModel {
         hideBalance = UserDefaults.standard.bool(forKey: "hideBalance")
         useTor = UserDefaults.standard.object(forKey: "useTor") as? Bool ?? true  // Tor unless switched off
         nodeURL = UserDefaults.standard.string(forKey: "nodeURL.\(Config.network)") ?? Config.defaultNodeURL
+        showOotle = UserDefaults.standard.bool(forKey: "showOotleTestnet")
         do {
             let loaded = try WalletStore.load()
             store = loaded
@@ -151,6 +178,18 @@ final class AppModel {
         let route = useTor ? tor.proxyURL(isolation: proxyWalletID?.uuidString) : nil
         if (try? WalletCore.setProxy(route)) == nil, useTor {
             try? WalletCore.setProxy(TorService.deadProxy)
+        }
+        // Ootle gets circuits of its own, so the indexer and the node don't share an exit address.
+        var ootleRoute = useTor ? tor.proxyURL(isolation: proxyWalletID.map { "\($0.uuidString)-ootle" }) : nil
+        if (try? OotleCore.setProxy(ootleRoute)) == nil, useTor {
+            try? OotleCore.setProxy(TorService.deadProxy)
+            ootleRoute = TorService.deadProxy
+        }
+        currentOotleRoute = ootleRoute
+        // An open Ootle wallet keeps the route it opened with: reopen it on the new one.
+        if ootle != nil, ootleWalletID == proxyWalletID, self.ootleRoute != ootleRoute {
+            stopOotle()
+            startOotle()
         }
     }
 
@@ -705,6 +744,152 @@ final class AppModel {
         return try core.seedWords
     }
 
+    // MARK: - Ootle (TARI)
+
+    func setShowOotle(_ on: Bool) {
+        showOotle = on
+        if on { startOotle() } else { stopOotle() }
+    }
+
+    /// Opens the open wallet's Ootle wallet in the background, if the TARI side is on.
+    private func startOotle() {
+        guard showOotle, ootle == nil, ootleState != .opening, let core = wallet, let id = activeID,
+              let profile = activeWallet, let password = sessionPassword else { return }
+        let directory: URL
+        do {
+            directory = try store.directory(for: profile, isNew: false)
+                .appendingPathComponent("ootle-\(Config.ootleNetwork)", isDirectory: true)
+        } catch {
+            ootleState = .failed(error.localizedDescription)
+            return
+        }
+        ootleState = .opening
+        let generation = ootleGeneration, epoch = lockEpoch, route = currentOotleRoute
+        Task {
+            let result = await Task.detached { () -> Result<(OotleCore, String), Error> in
+                Result {
+                    let opened = try OotleCore(l1: core, directory: directory, network: Config.ootleNetwork,
+                                               indexerURL: Config.ootleIndexerURL, password: password)
+                    return (opened, try opened.address)
+                }
+            }.value
+            // Clew locked, switched wallets or turned Ootle off meanwhile: this one isn't wanted.
+            guard ootleGeneration == generation, lockEpoch == epoch, activeID == id, wallet === core else {
+                if case .success(let (opened, _)) = result { retireOotle(opened, id: id) }
+                return
+            }
+            switch result {
+            case .success(let (opened, address)):
+                ootle = opened
+                ootleWalletID = id
+                ootleRoute = route
+                ootleAddress = address
+                ootleState = .ready
+                if route != currentOotleRoute {  // the route changed while it was opening
+                    stopOotle()
+                    startOotle()
+                    return
+                }
+                startOotlePolling()
+            case .failure(let error):
+                ootleState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    /// Closes the Ootle wallet in the background and forgets what it showed.
+    private func stopOotle() {
+        ootleGeneration += 1
+        ootlePoller?.cancel()
+        ootlePoller = nil
+        if let old = ootle, let id = ootleWalletID { retireOotle(old, id: id) }
+        ootle = nil
+        ootleWalletID = nil
+        ootleRoute = nil
+        ootleState = .off
+        tariBalance = 0
+        tariHistory = []
+        ootleAddress = ""
+        ootleOnline = nil
+    }
+
+    /// Shuts an Ootle wallet down in the wallet's queue of closings, so its files aren't reopened
+    /// or deleted until it's done.
+    private func retireOotle(_ core: OotleCore, id: UUID) {
+        let previous = closing[id]
+        closing[id] = Task.detached {
+            await previous?.value
+            core.shutdown()
+        }
+    }
+
+    func retryOotle() {
+        stopOotle()
+        startOotle()
+    }
+
+    /// Checks with the network every two minutes while the Ootle wallet is open.
+    private func startOotlePolling() {
+        ootlePoller?.cancel()
+        ootlePoller = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.refreshOotle()
+                try? await Task.sleep(for: .seconds(120))
+            }
+        }
+    }
+
+    /// Scans for payments, then reads the balance and history. Offline, it still shows what's known.
+    func refreshOotle() async {
+        guard let core = ootle else { return }
+        let generation = ootleGeneration
+        let (online, result) = await Task.detached { () -> (Bool, Result<(MicroTari, [OotleEntry]), Error>) in
+            let online = (try? core.refresh()) != nil
+            return (online, Result { (try core.balance, try core.history()) })
+        }.value
+        guard generation == ootleGeneration else { return }
+        ootleOnline = online
+        if case .success(let (balance, history)) = result {
+            tariBalance = balance
+            tariHistory = history
+        }
+    }
+
+    /// Runs a TARI action on the open Ootle wallet off the main thread, one at a time.
+    private func withOotle<T: Sendable>(_ work: @escaping @Sendable (OotleCore) throws -> T) async throws -> T {
+        guard let core = ootle, !ootleBusy else { throw OotleError.closed }
+        ootleBusy = true
+        defer { ootleBusy = false }
+        let result = try await Task.detached { try work(core) }.value
+        await refreshOotle()
+        return result
+    }
+
+    /// Claims the testnet's free 1,000 tTARI into the open wallet.
+    func claimTestTari() async throws {
+        _ = try await withOotle { try $0.claimFaucet() }
+    }
+
+    /// The exact fee for sending, from trial runs on the network (a few seconds over Tor).
+    func estimateTariFee(to address: String, amount: MicroTari) async throws -> MicroTari {
+        guard let core = ootle else { throw OotleError.closed }
+        return try await Task.detached { try core.estimateSendFee(to: address, amount: amount) }.value
+    }
+
+    /// Sends TARI from the wallet with id `walletID` after checking the password (or Touch ID).
+    /// Returns once the network has confirmed it. Throws `PasswordNeeded` when the password has to
+    /// be typed.
+    func sendTari(amount: MicroTari, to address: String, maxFee: MicroTari, from walletID: UUID?,
+                  password: String?) async throws {
+        guard ootle != nil, walletID == ootleWalletID else { throw OotleError.closed }
+        try await authorize(password: password, reason: "send \(XTM.format(amount)) tTARI")
+        guard walletID == ootleWalletID else { throw OotleError.closed }
+        _ = try await withOotle { try $0.send(to: address, amount: amount, maxFee: maxFee) }
+    }
+
+    /// The Ootle wallet's id, for screens that act on the wallet they were opened for.
+    var ootleWallet: UUID? { ootleWalletID }
+
     // MARK: - Internals
 
     /// Creates a profile and folder, then opens the wallet with the current password. Undoes both on failure.
@@ -819,6 +1004,7 @@ final class AppModel {
         }
 
         // Swap straight to the new wallet (no empty state in between), then shut the old one down.
+        stopOotle()
         if let previous = wallet, let previousID = activeID { retire(previous, id: previousID) }
         wallet = core
         activeID = profile.id
@@ -839,6 +1025,7 @@ final class AppModel {
             }
         }
         refresh()
+        startOotle()
     }
 
     /// Shuts a wallet down in the background. Opening the same wallet waits for this to finish.
@@ -859,6 +1046,7 @@ final class AppModel {
     }
 
     private func detach() {
+        stopOotle()
         wallet = nil
         generation += 1
         activeID = nil

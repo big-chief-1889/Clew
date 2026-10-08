@@ -158,7 +158,8 @@ final class WalletCore {
     private var isShutDown = false
 
     /// Runs `body` with the wallet guaranteed to stay alive. Throws `.closed` after shutdown.
-    private func using<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
+    /// The Ootle wallet uses it to read this wallet's seed inside the library while opening.
+    func using<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
         gate.lock()
         guard !isShutDown else { gate.unlock(); throw TariError.closed }
         callsInFlight += 1

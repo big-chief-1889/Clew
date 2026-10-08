@@ -3,4 +3,8 @@ enum Config {
     static let network = "mainnet"
     static let defaultNodeURL = "https://rpc.tari.com"
     static let isTestnet = false
+    // Ootle (Tari's layer 2) has no mainnet yet, so both builds use its testnet.
+    static let ootleNetwork = "esmeralda"
+    static let ootleIndexerURL = "https://ootle-indexer-a.tari.com/"
+    static let ootleAddressPrefix = "otl_esm_1"
 }
