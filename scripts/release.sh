@@ -78,7 +78,8 @@ fi
 [ "$found" = 0 ] || { echo "Release NOT made: remove the items above first." >&2; exit 1; }
 echo "  clean"
 
+# Zip timestamps have no time zone, so write them in UTC rather than local time.
 ZIP="Clew-$VERSION-mac.zip"
-(cd "$OUT" && ditto -c -k --keepParent Clew.app "$ZIP" && shasum -a 256 "$ZIP" > SHA256SUMS.txt)
+(cd "$OUT" && TZ=UTC ditto -c -k --norsrc --noextattr --noqtn --keepParent Clew.app "$ZIP" && shasum -a 256 "$ZIP" > SHA256SUMS.txt)
 rm -rf "$STAGE"
 echo "Done: build/release/$ZIP ($(du -h "$OUT/$ZIP" | cut -f1)) and build/release/SHA256SUMS.txt"
