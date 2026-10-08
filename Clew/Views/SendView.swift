@@ -14,6 +14,7 @@ struct SendView: View {
     @State private var speed = Speed.normal
     /// The wallet this screen sends from, fixed when it opens.
     @State private var walletID: UUID?
+    @State private var askingPassword = false
 
     enum Speed: String, CaseIterable, Identifiable {
         case economy = "Economy", normal = "Normal", fast = "Fast"
@@ -146,20 +147,26 @@ struct SendView: View {
         } message: {
             Text("To \(shortened(trimmedRecipient))\nFee \(XTM.format(fee ?? 0)) XTM\(tiers.networkBusy ? " (\(speed.rawValue))" : "")\n\nTransactions can't be reversed.")
         }
+        .passwordPrompt("Send \(XTM.format(amount ?? 0)) XTM", isPresented: $askingPassword) { typed in
+            Task { await send(password: typed) }
+        }
         .alert("Couldn't send", isPresented: .init(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("OK") {}
         } message: { Text(error ?? "") }
     }
 
-    private func send() async {
+    /// Sends after the password check: Touch ID first if it's on, otherwise (or if that's
+    /// cancelled) the password typed into the prompt.
+    private func send(password: String? = nil) async {
         guard let amount else { return }
         sending = true
         defer { sending = false }
         do {
             try await model.send(amount: amount, to: trimmedRecipient, note: note, feePerGram: feePerGram,
-                                 from: walletID)
+                                 from: walletID, password: password)
             dismiss()
-        } catch Vault.Failure.cancelled {
+        } catch is AppModel.PasswordNeeded {
+            askingPassword = true
         } catch {
             self.error = error.localizedDescription
         }

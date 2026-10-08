@@ -2,7 +2,7 @@ import SwiftUI
 
 struct WelcomeView: View {
     @Environment(AppModel.self) private var model
-    @State private var restoring = false
+    @State private var adding: AddWalletSheet.Mode?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,7 +17,7 @@ struct WelcomeView: View {
                 .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 14) {
-                Feature(icon: "touchid", text: "Locked with Touch ID")
+                Feature(icon: "lock", text: "Locked with your password")
                 Feature(icon: "desktopcomputer", text: "Keys never leave this Mac")
                 Feature(icon: "eye.slash", text: "No accounts, no tracking")
             }
@@ -25,11 +25,9 @@ struct WelcomeView: View {
 
             Spacer()
             VStack(spacing: 10) {
-                Button("Create a new wallet") {
-                    Task { await model.createWallet(name: model.suggestedWalletName) }
-                }
-                .buttonStyle(.wide)
-                Button("I already have recovery words") { restoring = true }
+                Button("Create a new wallet") { adding = .create }
+                    .buttonStyle(.wide)
+                Button("I already have recovery words") { adding = .restore }
                     .buttonStyle(.wideSecondary)
             }
             .disabled(model.busy)
@@ -37,8 +35,8 @@ struct WelcomeView: View {
         .padding(.horizontal, 32)
         .padding(.vertical, 28)
         .overlay { if model.busy { ProgressView() } }
-        .sheet(isPresented: $restoring) {
-            AddWalletSheet(mode: .restore).presentationBackground(Theme.background)
+        .sheet(item: $adding) { mode in
+            AddWalletSheet(mode: mode).presentationBackground(Theme.background)
         }
     }
 }
@@ -61,13 +59,20 @@ private struct Feature: View {
 
 /// Creates or restores a wallet with a name. Used from the welcome screen and the wallet menu.
 struct AddWalletSheet: View {
-    enum Mode { case create, restore }
+    enum Mode: String, Identifiable {
+        case create, restore
+        var id: String { rawValue }
+    }
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let mode: Mode
     @State private var name = ""
     @State private var words = ""
+    @State private var password = ""
+    @State private var confirmation = ""
+    /// The first wallet chooses the password; later ones use it.
+    @State private var choosingPassword = false
 
     private var wordCount: Int { SeedWords.parse(words).count }
 
@@ -109,6 +114,13 @@ struct AddWalletSheet: View {
                     .foregroundStyle(.secondary)
             }
 
+            if choosingPassword {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Password").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                    NewPasswordFields(password: $password, confirmation: $confirmation)
+                }
+            }
+
             HStack {
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -116,23 +128,30 @@ struct AddWalletSheet: View {
                 Button(mode == .create ? "Create" : "Restore") { Task { await submit() } }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(model.busy || (mode == .restore && wordCount != 24))
+                    .disabled(model.busy || (mode == .restore && wordCount != 24)
+                              || (choosingPassword && !NewPasswordFields.isValid(password, confirmation)))
             }
         }
         .padding(24)
         .frame(width: 420)
         .overlay { if model.busy { ProgressView() } }
-        .onAppear { name = model.suggestedWalletName }
-        .onDisappear { words = "" }
+        .onAppear {
+            name = model.suggestedWalletName
+            choosingPassword = model.needsNewPassword
+        }
+        .onDisappear { words = ""; password = ""; confirmation = "" }
     }
 
     private func submit() async {
         switch mode {
         case .create:
+            let chosen = choosingPassword ? password : nil
             dismiss()
-            await model.createWallet(name: name)
+            await model.createWallet(name: name, password: chosen)
         case .restore:
-            if await model.restoreWallet(name: name, from: words) { dismiss() }
+            if await model.restoreWallet(name: name, from: words, password: choosingPassword ? password : nil) {
+                dismiss()
+            }
         }
     }
 }

@@ -4,6 +4,9 @@ struct HomeView: View {
     @Environment(AppModel.self) private var model
     @State private var sheet: Sheet?
     @State private var showingWallets = false
+    @State private var askingNewest = false
+    @State private var askingEarlier = false
+    @State private var earlierPasswordWallet: WalletProfile?
 
     enum Sheet: Identifiable {
         case send, receive, settings, add(AddWalletSheet.Mode), detail(WalletTransaction)
@@ -27,6 +30,28 @@ struct HomeView: View {
             }
         }
         .animation(.smooth(duration: 0.3), value: showingWallets)
+        .passwordPrompt("Finish your password change",
+                        message: "Your Clew password was changed, but Clew was unlocked with the previous one. Enter your newest password to bring every wallet up to date.",
+                        isPresented: $askingNewest) { typed in
+            Task { _ = await model.finishPasswordChange(newest: typed) }
+        }
+        .passwordPrompt("“\(earlierPasswordWallet?.name ?? "This wallet")” uses an earlier password",
+                        message: "This wallet was left on a password from before your last change. Enter that earlier password to bring it up to date.",
+                        isPresented: $askingEarlier) { typed in
+            if let id = earlierPasswordWallet?.id { Task { await model.switchTo(id, previousPassword: typed) } }
+        }
+        // The model asks; the prompt keeps its own copy of what it's about.
+        .onChange(of: model.walletNeedingPreviousPassword, initial: true) {
+            guard let wallet = model.walletNeedingPreviousPassword else { return }
+            earlierPasswordWallet = wallet
+            model.walletNeedingPreviousPassword = nil
+            askingEarlier = true
+        }
+        .onChange(of: model.needsNewestPassword, initial: true) {
+            guard model.needsNewestPassword else { return }
+            model.needsNewestPassword = false
+            askingNewest = true
+        }
     }
 
     private var content: some View {

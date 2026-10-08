@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import LocalAuthentication
 import Observation
 
 @MainActor @Observable
@@ -42,9 +41,19 @@ final class AppModel {
 
     var activeWallet: WalletProfile? { wallets.first { $0.id == activeID } }
 
+    /// Every wallet still uses a Keychain key (made before passwords): the lock screen offers the
+    /// one-time switch instead of a password field. Stragglers are switched after unlocking.
+    var needsPasswordSwitch: Bool { !wallets.isEmpty && wallets.allSatisfy(\.needsPasswordSwitch) }
+    /// Unlock and confirm with Touch ID instead of typing the password.
+    private(set) var touchIDEnabled = TouchIDShortcut.isEnabled
+
+    /// Thrown when an action needs the password typed in (no Touch ID shortcut, or it failed).
+    struct PasswordNeeded: Error {}
+
     private var store: WalletStore
     private var wallet: WalletCore?
-    private var session: LAContext?   // one Touch ID unlocks every wallet until the app locks
+    /// The password, kept while Clew is unlocked so every wallet can open without asking again.
+    private var sessionPassword: String?
     private var generation = 0        // ignores late events from a wallet that was just closed
     /// Bumped by every lock. An operation that started before a lock stops at its next step.
     private var lockEpoch = 0
@@ -149,26 +158,46 @@ final class AppModel {
 
     // MARK: - Adding wallets
 
-    func createWallet(name: String) async {
+    /// True when no password has been chosen yet (no wallets, or Clew is on the welcome screen).
+    var needsNewPassword: Bool { wallets.isEmpty || sessionPassword == nil }
+
+    /// `password` is only needed for the first wallet; later ones use the current password.
+    func createWallet(name: String, password: String? = nil) async {
         await run { epoch in
-            try await self.add(name: name, seedWords: nil, epoch: epoch)
-            self.phase = .backup(try self.wallet!.seedWords)
+            try await self.choosingFirstPassword(password) {
+                try await self.add(name: name, seedWords: nil, epoch: epoch)
+                self.phase = .backup(try self.wallet!.seedWords)
+            }
         }
     }
 
     /// Returns true on success, so the sheet that asked can close.
-    func restoreWallet(name: String, from text: String) async -> Bool {
+    func restoreWallet(name: String, from text: String, password: String? = nil) async -> Bool {
         var restored = false
         await run { epoch in
-            let words = SeedWords.parse(text)
-            try SeedWords.validate(words)
-            var profile = try await self.add(name: name, seedWords: words, epoch: epoch)
-            profile.backedUp = true
-            try self.update(profile)
-            self.phase = .unlocked
-            restored = true
+            try await self.choosingFirstPassword(password) {
+                let words = SeedWords.parse(text)
+                try SeedWords.validate(words)
+                var profile = try await self.add(name: name, seedWords: words, epoch: epoch)
+                profile.backedUp = true
+                try self.update(profile)
+                self.phase = .unlocked
+                restored = true
+            }
         }
         return restored
+    }
+
+    /// For the first wallet: uses `password` for it, and forgets it again if making the wallet fails.
+    private func choosingFirstPassword(_ password: String?, _ work: () async throws -> Void) async throws {
+        let first = needsNewPassword
+        if let password, first { sessionPassword = password }
+        do {
+            try await work()
+        } catch {
+            if first && wallets.isEmpty { sessionPassword = nil }
+            throw error
+        }
     }
 
     func finishBackup() {
@@ -178,38 +207,73 @@ final class AppModel {
 
     // MARK: - Lock and switch
 
-    func unlock() async {
+    /// Unlocks with `password`, or with the Touch ID shortcut when `password` is nil. Any wallet the
+    /// password opens counts. If that wallet is on an older password than others (a password change
+    /// was cut short), Clew asks for the newest one to finish the change. Wallets still on the
+    /// Keychain are then switched to the password (once per launch) unless `switchingLegacy` is false.
+    func unlock(password typed: String?, switchingLegacy: Bool = true) async {
+        var leftOver: [String] = []
         await run { epoch in
-            let session = try await Vault.startSession(reason: "unlock your Tari wallets")
-            guard self.lockEpoch == epoch else { session.invalidate(); throw Interrupted() }
-            self.session = session
-            // Last-used wallet first. If one can't be opened, try the others, so a single broken
-            // wallet doesn't lock you out of all of them.
-            let lastUsed = self.store.lastUsed
-            let ordered = self.wallets.filter { $0.id == lastUsed } + self.wallets.filter { $0.id != lastUsed }
-            var failure: (name: String, error: Error)?
-            for profile in ordered {
+            let password: String
+            if let typed { password = typed } else {
+                password = try await TouchIDShortcut.password(reason: "unlock Clew")
+            }
+            guard self.lockEpoch == epoch else { throw Interrupted() }
+            self.sessionPassword = password
+            let found: WalletProfile?
+            do {
+                found = try await self.openFirstAvailable(password: password, epoch: epoch)
+            } catch {
+                self.endSession()
+                throw error
+            }
+            guard let opened = found else {
+                self.endSession()
+                throw TariError.wrongPassword
+            }
+            self.sessionGeneration = opened.generation
+            self.sessionEstablished = true
+            self.phase = .unlocked
+            if opened.generation < self.newestGeneration { self.needsNewestPassword = true }
+            if switchingLegacy && !self.triedLegacySwitch {
+                self.triedLegacySwitch = true
                 do {
-                    try await self.open(profile, passphrase: self.passphrase(for: profile), seedWords: nil,
-                                        epoch: epoch)
-                    self.phase = .unlocked
-                    if let failure {
-                        self.errorMessage = "Couldn't open “\(failure.name)”: \(failure.error.localizedDescription)"
-                    }
-                    return
-                } catch let error as Interrupted {
-                    throw error
+                    leftOver = try await self.switchLegacyWallets(to: password, epoch: epoch)
                 } catch Vault.Failure.cancelled {
-                    throw Vault.Failure.cancelled
-                } catch {
-                    guard self.lockEpoch == epoch else { throw Interrupted() }  // locked: don't try others
-                    failure = failure ?? (profile.name, error)
+                    leftOver = ["Some wallets still use the Keychain. Clew will offer to switch them next time it starts."]
                 }
             }
-            self.endSession()
-            if let failure { throw failure.error }
-            self.phase = .welcome
         }
+        if !leftOver.isEmpty {
+            errorMessage = "Not every wallet could be switched to your password yet:\n" + leftOver.joined(separator: "\n")
+        }
+    }
+
+    /// Opens the first wallet `password` opens: the last-used one if it can, then newest password
+    /// generation first. Returns nil if it opens none (so it's the wrong password).
+    private func openFirstAvailable(password: String, epoch: Int) async throws -> WalletProfile? {
+        let lastUsed = store.lastUsed
+        let ready = wallets.filter { !$0.needsPasswordSwitch }.sorted { $0.generation > $1.generation }
+        let ordered = ready.filter { $0.id == lastUsed } + ready.filter { $0.id != lastUsed }
+        var failure: (name: String, error: Error)?
+        for profile in ordered {
+            do {
+                try await open(profile, passphrase: password, seedWords: nil, epoch: epoch)
+                if let failure {
+                    errorMessage = "Couldn't open “\(failure.name)”: \(failure.error.localizedDescription)"
+                }
+                return profile
+            } catch let error as Interrupted {
+                throw error
+            } catch let error as TariError where error.isWrongPassword {
+                continue  // on a different password; another wallet may open
+            } catch {
+                guard lockEpoch == epoch else { throw Interrupted() }  // locked: don't try others
+                failure = failure ?? (profile.name, error)
+            }
+        }
+        if let failure { throw failure.error }
+        return nil
     }
 
     /// Closes the open wallet and forgets the unlock. Always wins over an operation in progress:
@@ -220,14 +284,54 @@ final class AppModel {
         if let old = wallet, let id = activeID { retire(old, id: id) }
         detach()
         endSession()
+        walletNeedingPreviousPassword = nil
+        needsNewestPassword = false
         if phase == .unlocked { phase = .locked }
     }
 
-    func switchTo(_ id: UUID) async {
+    /// A wallet on an older password than the one Clew is unlocked with (it rejected the current
+    /// one). The UI asks for that password and calls `switchTo(_:previousPassword:)`.
+    var walletNeedingPreviousPassword: WalletProfile?
+    /// Clew was unlocked with an older password than some wallets have: a password change was cut
+    /// short. The UI asks for the newest password and calls `finishPasswordChange(newest:)`.
+    var needsNewestPassword = false
+    /// The password generation of the password Clew is unlocked with.
+    private var sessionGeneration = 0
+    /// True once unlock has worked out `sessionGeneration`.
+    private var sessionEstablished = false
+    private var triedLegacySwitch = false
+    private var newestGeneration: Int { wallets.filter { !$0.needsPasswordSwitch }.map(\.generation).max() ?? 0 }
+
+    /// Opens another wallet. With `previousPassword`, first brings a wallet that's on an older
+    /// password up to the current one.
+    func switchTo(_ id: UUID, previousPassword: String? = nil) async {
+        if previousPassword != nil { await waitUntilIdle() }  // answered a prompt: don't drop it
         guard id != activeID, let profile = wallets.first(where: { $0.id == id }) else { return }
         await run { epoch in
-            // Different files, so the new wallet can open before the old one closes.
-            try await self.open(profile, passphrase: self.passphrase(for: profile), seedWords: nil, epoch: epoch)
+            let current = try self.currentPassword()
+            if let previousPassword {
+                let directory = try self.store.directory(for: profile, isNew: false)
+                if let pending = self.closing[profile.id] { await pending.value }
+                try await self.rekeying {
+                    try await Task.detached {
+                        try WalletCore.changePassword(directory: directory, from: previousPassword, to: current)
+                    }.value
+                    var updated = profile
+                    updated.passwordGeneration = self.sessionGeneration
+                    try self.update(updated)
+                }
+            }
+            guard let fresh = self.wallets.first(where: { $0.id == id }) else { return }
+            do {
+                // Different files, so the new wallet can open before the old one closes.
+                try await self.open(fresh, passphrase: current, seedWords: nil, epoch: epoch)
+            } catch let error as TariError where error.isWrongPassword && fresh.usesPassword == true {
+                if fresh.generation > self.sessionGeneration {
+                    self.needsNewestPassword = true        // it has a newer password than this session
+                } else {
+                    self.walletNeedingPreviousPassword = fresh
+                }
+            }
         }
     }
 
@@ -238,10 +342,272 @@ final class AppModel {
 
     private func reopenActive(epoch: Int) async throws {
         guard let profile = activeWallet, wallet != nil else { return }
-        let passphrase = try await passphrase(for: profile)
+        let passphrase = try currentPassword()
         guard lockEpoch == epoch else { throw Interrupted() }
         await closeWallet()
         try await open(profile, passphrase: passphrase, seedWords: nil, epoch: epoch)
+    }
+
+    // MARK: - Password
+
+    /// True while wallet files are being re-encrypted. Quitting is refused meanwhile (see AppDelegate).
+    static private(set) var isRekeying = false
+
+    private func rekeying<T>(_ work: () async throws -> T) async rethrows -> T {
+        Self.isRekeying = true
+        defer { Self.isRekeying = false }
+        return try await work()
+    }
+
+    /// Checks the person in front of the Mac before a sensitive action: `password` if one was typed,
+    /// otherwise the Touch ID shortcut. Throws `PasswordNeeded` when the password must be typed.
+    private func authorize(password: String?, reason: String) async throws {
+        guard let sessionPassword else { throw TariError.closed }
+        if let password {
+            guard password == sessionPassword else { throw TariError.wrongPassword }
+            return
+        }
+        guard touchIDEnabled else { throw PasswordNeeded() }
+        do {
+            guard try await TouchIDShortcut.password(reason: reason) == sessionPassword else {
+                throw TouchIDShortcut.Failure.stale
+            }
+        } catch {
+            throw PasswordNeeded()  // cancelled or failed: offer the password instead
+        }
+    }
+
+    /// First-time switch, when every wallet still uses a Keychain key: re-encrypts them with
+    /// `password` and unlocks. Wallets that can't be switched are skipped and reported, so one
+    /// broken wallet doesn't lock you out of the rest.
+    func switchToPassword(_ password: String) async {
+        let startEpoch = lockEpoch
+        var leftOver: [String] = []
+        await run { epoch in leftOver = try await self.switchLegacyWallets(to: password, epoch: epoch) }
+        guard lockEpoch == startEpoch else { return }  // locked meanwhile: stay locked
+        triedLegacySwitch = true
+        if wallets.contains(where: { !$0.needsPasswordSwitch }) {
+            await unlock(password: password, switchingLegacy: false)
+        }
+        if !leftOver.isEmpty {
+            errorMessage = "Not every wallet could be switched to your password yet:\n" + leftOver.joined(separator: "\n")
+        }
+    }
+
+    /// Re-encrypts every wallet that still uses a Keychain key with `password`, one Touch ID or Mac
+    /// password prompt for all of them. Returns a line for each wallet it couldn't switch.
+    /// Safe if interrupted at any point: each wallet is recorded as switched before its old key is
+    /// deleted, and a wallet the old key definitely no longer opens was already switched.
+    private func switchLegacyWallets(to password: String, epoch: Int) async throws -> [String] {
+        let legacy = wallets.filter(\.needsPasswordSwitch)
+        guard !legacy.isEmpty else { return [] }
+        let generation = sessionPassword == password ? sessionGeneration : newestGeneration
+        let session = try await Vault.startSession(reason: "switch your wallets to your Clew password")
+        defer { session.invalidate() }
+        var problems: [String] = []
+        for var profile in legacy {
+            guard lockEpoch == epoch else { throw Interrupted() }
+            do {
+                let old = try await Vault.readPassphrase(account: profile.keychainAccount, session: session,
+                                                         reason: "switch “\(profile.name)” to your password")
+                let directory = try store.directory(for: profile, isNew: false)
+                if let pending = closing[profile.id] { await pending.value }
+                var keyStillValid = true
+                try await rekeying {
+                    do {
+                        try await Task.detached {
+                            try WalletCore.changePassword(directory: directory, from: old, to: password)
+                        }.value
+                    } catch let error as TariError where error.isWrongPassword {
+                        // The library says the old key definitely doesn't open it any more: it was
+                        // switched before Clew could record that, to a password Clew can't identify.
+                        keyStillValid = false
+                    }
+                }
+                // Record the switch before deleting the old key.
+                profile.usesPassword = true
+                profile.passwordGeneration = keyStillValid ? generation : -1
+                try update(profile)
+                if keyStillValid { try? Vault.deletePassphrase(account: profile.keychainAccount) }
+            } catch let error as Interrupted {
+                throw error
+            } catch {
+                problems.append("“\(profile.name)”: \(error.localizedDescription)")
+            }
+        }
+        return problems
+    }
+
+    /// Finishes a password change that was cut short: checks `newest` against a wallet that has it,
+    /// then re-encrypts the wallets still on the password Clew was unlocked with. Returns true on success.
+    func finishPasswordChange(newest: String) async -> Bool {
+        await waitUntilIdle()  // answered a prompt: don't drop it
+        var finished = false
+        await run { epoch in
+            let older = try self.currentPassword()
+            let target = self.newestGeneration
+            guard let witness = self.wallets.first(where: { !$0.needsPasswordSwitch && $0.generation == target }) else {
+                return
+            }
+            // Check it's really the newest password before touching anything. The witness has a
+            // newer password than the session, so it's never the open wallet.
+            let witnessDirectory = try self.store.directory(for: witness, isNew: false)
+            if let pending = self.closing[witness.id] { await pending.value }
+            do {
+                try await Task.detached {
+                    try WalletCore.changePassword(directory: witnessDirectory, from: newest, to: newest)
+                }.value
+            } catch {
+                self.needsNewestPassword = true  // ask again
+                throw error
+            }
+            let reopen = self.activeWallet
+            await self.closeWallet()
+            do {
+                try await self.rekeying {
+                    for var profile in self.wallets
+                    where !profile.needsPasswordSwitch && profile.generation == self.sessionGeneration {
+                        let directory = try self.store.directory(for: profile, isNew: false)
+                        if let pending = self.closing[profile.id] { await pending.value }
+                        do {
+                            try await Task.detached {
+                                try WalletCore.changePassword(directory: directory, from: older, to: newest)
+                            }.value
+                        } catch let error as TariError where error.isWrongPassword {
+                            // Already on the newest password (its label was out of date); just confirm it.
+                            try await Task.detached {
+                                try WalletCore.changePassword(directory: directory, from: newest, to: newest)
+                            }.value
+                        }
+                        profile.passwordGeneration = target
+                        try self.update(profile)
+                    }
+                }
+            } catch {
+                await self.reopenAfterFailure(reopen, passwords: [older, newest], epoch: epoch)
+                throw error
+            }
+            if self.lockEpoch == epoch {
+                self.sessionPassword = newest
+                self.sessionGeneration = target
+                self.needsNewestPassword = false
+            }
+            if self.touchIDEnabled { try? TouchIDShortcut.update(password: newest) }
+            finished = true
+            await self.reopenAfterFailure(reopen, passwords: [newest, older], epoch: epoch)
+        }
+        return finished
+    }
+
+    /// Reopens `profile` with the first of `passwords` that works, so Clew isn't left unlocked with
+    /// no wallet open.
+    private func reopenAfterFailure(_ profile: WalletProfile?, passwords: [String], epoch: Int) async {
+        guard let profile, let fresh = wallets.first(where: { $0.id == profile.id }) else { return }
+        for password in passwords {
+            if (try? await open(fresh, passphrase: password, seedWords: nil, epoch: epoch)) != nil { return }
+        }
+    }
+
+    /// Waits for the current operation to finish, so an action started from a prompt isn't ignored
+    /// for arriving while Clew was busy.
+    private func waitUntilIdle() async {
+        while busy { try? await Task.sleep(for: .milliseconds(100)) }
+    }
+
+    enum PasswordChangeProblem: LocalizedError {
+        case notInLine([String]), wallet(String, Error), rollbackIncomplete([String])
+        var errorDescription: String? {
+            switch self {
+            case .notInLine(let names):
+                "The password wasn't changed: \(names.joined(separator: ", ")) still use a different password. Open them once first."
+            case .wallet(let name, let error):
+                "The password wasn't changed: “\(name)” couldn't be updated (\(error.localizedDescription)). Open it once, or delete it, then try again."
+            case .rollbackIncomplete(let names):
+                "The password change stopped part-way, so \(names.joined(separator: ", ")) kept the new password. Clew will ask for it to finish the change when you unlock."
+            }
+        }
+    }
+
+    /// Changes the password of every wallet that uses the current one. Wallets still on the Keychain
+    /// are left alone (they switch to the current password at the next unlock). Each wallet records
+    /// the new generation as soon as it's re-encrypted, so an interrupted change can be finished
+    /// later. If any wallet fails, the ones already changed are put back. Quitting is refused until
+    /// it's done. Returns true on success.
+    func changePassword(current: String, new: String) async -> Bool {
+        guard current == sessionPassword else {
+            errorMessage = TariError.wrongPassword.localizedDescription
+            return false
+        }
+        let behind = wallets.filter { !$0.needsPasswordSwitch && $0.generation != sessionGeneration }
+        guard behind.isEmpty else {
+            errorMessage = PasswordChangeProblem.notInLine(behind.map { "“\($0.name)”" }).localizedDescription
+            return false
+        }
+        var changed = false
+        await run { epoch in
+            let reopen = self.activeWallet
+            let oldGeneration = self.sessionGeneration
+            let newGeneration = self.newestGeneration + 1
+            await self.closeWallet()
+            try await self.rekeying {
+                var done: [WalletProfile] = []
+                do {
+                    for var profile in self.wallets where !profile.needsPasswordSwitch {
+                        do {
+                            let directory = try self.store.directory(for: profile, isNew: false)
+                            if let pending = self.closing[profile.id] { await pending.value }
+                            try await Task.detached {
+                                try WalletCore.changePassword(directory: directory, from: current, to: new)
+                            }.value
+                            profile.passwordGeneration = newGeneration
+                            done.append(profile)
+                            try self.update(profile)
+                        } catch {
+                            throw PasswordChangeProblem.wallet(profile.name, error)
+                        }
+                    }
+                } catch {
+                    var stuck: [String] = []
+                    for var profile in done {
+                        do {
+                            let directory = try self.store.directory(for: profile, isNew: false)
+                            try await Task.detached {
+                                try WalletCore.changePassword(directory: directory, from: new, to: current)
+                            }.value
+                            profile.passwordGeneration = oldGeneration
+                            try self.update(profile)
+                        } catch {
+                            stuck.append("“\(profile.name)”")
+                        }
+                    }
+                    await self.reopenAfterFailure(reopen, passwords: [current, new], epoch: epoch)
+                    throw stuck.isEmpty ? error : PasswordChangeProblem.rollbackIncomplete(stuck)
+                }
+            }
+            if self.lockEpoch == epoch {  // not kept if Clew locked meanwhile
+                self.sessionPassword = new
+                self.sessionGeneration = newGeneration
+            }
+            if self.touchIDEnabled { try? TouchIDShortcut.update(password: new) }
+            changed = true
+            await self.reopenAfterFailure(reopen, passwords: [new, current], epoch: epoch)
+        }
+        return changed
+    }
+
+    /// Turns the Touch ID shortcut on (for the current password) or off.
+    func setTouchID(_ on: Bool) {
+        if on {
+            guard let sessionPassword else { return }
+            do {
+                try TouchIDShortcut.enable(password: sessionPassword)
+            } catch {
+                errorMessage = "Couldn't turn on Touch ID: \(error.localizedDescription)"
+            }
+        } else {
+            TouchIDShortcut.disable()
+        }
+        touchIDEnabled = TouchIDShortcut.isEnabled
     }
 
     // MARK: - Managing wallets
@@ -259,30 +625,34 @@ final class AppModel {
         try? update(profile)
     }
 
-    /// Deletes the active wallet after a Touch ID check. Returns true if it was deleted.
-    func deleteActiveWallet() async -> Bool {
-        guard let profile = activeWallet else { return false }
+    /// Deletes a wallet (open or not) after checking the password (or Touch ID). Returns true if it
+    /// was deleted. Throws `PasswordNeeded` when the password has to be typed.
+    func deleteWallet(_ id: UUID, password: String?) async throws -> Bool {
+        guard let profile = wallets.first(where: { $0.id == id }) else { return false }
+        let startEpoch = lockEpoch
+        try await authorize(password: password, reason: "delete “\(profile.name)” from your Mac")
         var deleted = false
         await run { epoch in
-            try await Vault.confirmOwner(reason: "delete “\(profile.name)” from your Mac")
-            guard self.lockEpoch == epoch, self.activeID == profile.id else { throw Interrupted() }
-            await self.closeWallet()
+            guard self.lockEpoch == startEpoch, self.lockEpoch == epoch else { throw Interrupted() }
+            let wasActive = self.activeID == profile.id
+            if wasActive { await self.closeWallet() }
+            if let pending = self.closing[profile.id] { await pending.value }  // never delete files in use
+            if self.walletNeedingPreviousPassword?.id == profile.id { self.walletNeedingPreviousPassword = nil }
             do {
                 try self.remove(profile)
             } catch {
-                self.lock()  // leave Clew in a safe, simple state
+                if wasActive { self.lock() }  // leave Clew in a safe, simple state
                 throw error
             }
             deleted = true
-            if let next = self.wallets.first {
-                do {
-                    try await self.open(next, passphrase: self.passphrase(for: next), seedWords: nil, epoch: epoch)
-                } catch {
-                    self.lock()
-                }
-            } else {
+            if self.wallets.isEmpty {
                 self.endSession()
+                TouchIDShortcut.disable()  // it holds the old password, which no wallet uses now
+                self.touchIDEnabled = false
                 self.phase = .welcome
+            } else if wasActive {
+                let opened = try? await self.openFirstAvailable(password: self.currentPassword(), epoch: epoch)
+                if opened == nil { self.lock() }
             }
         }
         return deleted
@@ -300,12 +670,13 @@ final class AppModel {
         return await Task.detached { (try? wallet.feeTiers()) ?? .fallback }.value
     }
 
-    /// Sends from the wallet with id `walletID` (the one the Send screen was opened for). Refuses if
-    /// Clew switched or locked while Touch ID was showing.
+    /// Sends from the wallet with id `walletID` (the one the Send screen was opened for), after
+    /// checking the password (or Touch ID). Refuses if Clew switched or locked in the meantime.
+    /// Throws `PasswordNeeded` when the password has to be typed.
     func send(amount: MicroTari, to recipient: String, note: String, feePerGram: MicroTari,
-              from walletID: UUID?) async throws {
+              from walletID: UUID?, password: String?) async throws {
         guard let core = wallet, walletID == activeID else { throw TariError.closed }
-        try await Vault.confirmOwner(reason: "send \(XTM.format(amount)) XTM")
+        try await authorize(password: password, reason: "send \(XTM.format(amount)) XTM")
         guard core === wallet, walletID == activeID else { throw TariError.closed }
         try core.send(amount: amount, to: recipient, note: note, feePerGram: feePerGram)
         refresh()
@@ -326,29 +697,28 @@ final class AppModel {
         }
     }
 
-    func revealSeedWords() async throws -> [String] {
-        guard let core = wallet else { throw Vault.Failure.missing }
-        try await Vault.confirmOwner(reason: "show your recovery words")
+    /// Throws `PasswordNeeded` when the password has to be typed.
+    func revealSeedWords(password: String?) async throws -> [String] {
+        guard let core = wallet else { throw TariError.closed }
+        try await authorize(password: password, reason: "show your recovery words")
         guard core === wallet else { throw TariError.closed }
         return try core.seedWords
     }
 
     // MARK: - Internals
 
-    /// Creates a profile, Keychain item and folder, then opens the wallet. Undoes all of it on failure.
+    /// Creates a profile and folder, then opens the wallet with the current password. Undoes both on failure.
     @discardableResult
     private func add(name: String, seedWords: [String]?, epoch: Int) async throws -> WalletProfile {
         let id = UUID()
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let profile = WalletProfile(
             id: id, name: trimmed.isEmpty ? store.suggestedName() : trimmed, folder: id.uuidString,
-            keychainAccount: "wallet-db-passphrase.\(Config.network).\(id.uuidString)",
-            backedUp: false, created: Date())
-        let passphrase = try Vault.createPassphrase(account: profile.keychainAccount)
+            keychainAccount: "", backedUp: false, created: Date(), usesPassword: true,
+            passwordGeneration: needsNewPassword ? 0 : sessionGeneration)
+        let passphrase = try currentPassword()
         do {
-            store.wallets.append(profile)
-            try store.save()
-            wallets = store.wallets
+            try commit { $0.wallets.append(profile) }
             // Only swaps to the new wallet once it's fully open, so a failure leaves the
             // current wallet running and this cleanup can't touch it.
             try await open(profile, passphrase: passphrase, seedWords: seedWords, isNew: true, epoch: epoch)
@@ -360,32 +730,41 @@ final class AppModel {
         }
     }
 
-    /// Forgets a wallet, then deletes its Keychain item and files, in that order: if a later step
-    /// fails, the leftovers are never mistaken for a wallet to open.
+    /// Forgets a wallet, then deletes its files (and an old-style Keychain key), in that order: if a
+    /// later step fails, the leftovers are never mistaken for a wallet to open.
     private func remove(_ profile: WalletProfile) throws {
-        store.wallets.removeAll { $0.id == profile.id }
-        if store.lastUsed == profile.id { store.lastUsed = store.wallets.first?.id }
-        try store.save()
-        wallets = store.wallets
-        try Vault.deletePassphrase(account: profile.keychainAccount)
+        try commit { store in
+            store.wallets.removeAll { $0.id == profile.id }
+            if store.lastUsed == profile.id { store.lastUsed = store.wallets.first?.id }
+        }
+        if profile.needsPasswordSwitch { try? Vault.deletePassphrase(account: profile.keychainAccount) }
         try store.removeFiles(of: profile)
     }
 
     private func update(_ profile: WalletProfile) throws {
-        guard let index = store.wallets.firstIndex(where: { $0.id == profile.id }) else { return }
-        store.wallets[index] = profile
-        try store.save()
-        wallets = store.wallets
+        try commit { store in
+            if let index = store.wallets.firstIndex(where: { $0.id == profile.id }) { store.wallets[index] = profile }
+        }
     }
 
-    private func passphrase(for profile: WalletProfile) async throws -> String {
-        try await Vault.readPassphrase(account: profile.keychainAccount, session: session,
-                                       reason: "open “\(profile.name)”")
+    /// Changes the wallet list on disk first, and only then in memory, so the two never disagree.
+    private func commit(_ change: (inout WalletStore) -> Void) throws {
+        var next = store
+        change(&next)
+        try next.save()
+        store = next
+        wallets = next.wallets
+    }
+
+    private func currentPassword() throws -> String {
+        guard let sessionPassword else { throw Interrupted() }  // locked in the meantime
+        return sessionPassword
     }
 
     private func endSession() {
-        session?.invalidate()
-        session = nil
+        sessionPassword = nil
+        sessionGeneration = 0
+        sessionEstablished = false
     }
 
     /// Opens a wallet as part of an operation that started in lock epoch `epoch`: if Clew has
@@ -450,8 +829,15 @@ final class AppModel {
         balance = Balance()
         transactions = []
         address = newAddress
-        store.lastUsed = profile.id
-        try? store.save()
+        try? commit { store in
+            store.lastUsed = profile.id
+            // It opened with the password Clew is unlocked with, so that's its generation.
+            if sessionEstablished, passphrase == sessionPassword, profile.usesPassword == true,
+               let index = store.wallets.firstIndex(where: { $0.id == profile.id }),
+               store.wallets[index].generation != sessionGeneration {
+                store.wallets[index].passwordGeneration = sessionGeneration
+            }
+        }
         refresh()
     }
 
@@ -532,6 +918,8 @@ final class AppModel {
             // Clew locked part-way through; the lock screen says all there is to say.
         } catch Vault.Failure.cancelled {
             // The user dismissed Touch ID; nothing to report.
+        } catch TouchIDShortcut.Failure.cancelled {
+            // Same.
         } catch {
             errorMessage = error.localizedDescription
         }

@@ -11,7 +11,7 @@ index aeaf153..cf6d6ae 100644
  
  chacha20poly1305 = "0.10.1"
 diff --git a/base_layer/wallet_ffi/src/lib.rs b/base_layer/wallet_ffi/src/lib.rs
-index afe0661..645c546 100644
+index afe0661..b61d122 100644
 --- a/base_layer/wallet_ffi/src/lib.rs
 +++ b/base_layer/wallet_ffi/src/lib.rs
 @@ -6559,6 +6559,8 @@ pub unsafe extern "C" fn wallet_create(
@@ -23,7 +23,7 @@ index afe0661..645c546 100644
              http_server_url: http_base_node,
              birthday_offset: wallet_birthday_offset,
              ..Default::default()
-@@ -9610,6 +9612,48 @@ pub unsafe extern "C" fn log_debug_message(msg: *const c_char, error_out: *mut c
+@@ -9610,6 +9612,105 @@ pub unsafe extern "C" fn log_debug_message(msg: *const c_char, error_out: *mut c
      }
  }
  
@@ -63,6 +63,63 @@ index afe0661..645c546 100644
 +            Err(e) => {
 +                error!(target: LOG_TARGET, "Invalid proxy: {e}");
 +                *error_out = LibWalletError::from(InterfaceError::InvalidArgument("proxy".to_string())).code;
++                false
++            },
++        }
++    }
++}
++
++/// Changes the passphrase of a wallet database that is not open, without starting any wallet services.
++///
++/// ## Arguments
++/// `config` - The TariWalletDbConfig pointer of the wallet
++/// `existing` - The current passphrase
++/// `new` - The new passphrase
++/// `error_out` - Pointer to an int which will be modified to an error code should one occur, may not be null.
++///
++/// ## Returns
++/// `bool` - true if the passphrase was changed. A wrong `existing` passphrase changes nothing and reports the same
++/// error as opening the wallet with it.
++///
++/// # Safety
++/// The wallet must not be open (no TariWallet created from this config may be running).
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn wallet_change_passphrase(
++    config: *mut TariWalletDbConfig,
++    existing: *const c_char,
++    new: *const c_char,
++    error_out: *mut c_int,
++) -> bool {
++    unsafe {
++        if error_out.is_null() {
++            return false;
++        }
++        *error_out = 0;
++        if config.is_null() || existing.is_null() || new.is_null() {
++            *error_out = LibWalletError::from(InterfaceError::NullError("passphrase change".to_string())).code;
++            return false;
++        }
++        let (existing, new) = match (CStr::from_ptr(existing).to_str(), CStr::from_ptr(new).to_str()) {
++            (Ok(e), Ok(n)) => (SafePassword::from(e.to_owned()), SafePassword::from(n.to_owned())),
++            _ => {
++                *error_out = LibWalletError::from(InterfaceError::PointerError("passphrase".to_string())).code;
++                return false;
++            },
++        };
++        let path = get_wallet_database_path(&*config);
++        let result = minotari_wallet::storage::sqlite_utilities::run_migration_and_create_sqlite_connection(path, 1)
++            .and_then(|connection| {
++                // Opening checks the existing passphrase.
++                minotari_wallet::storage::sqlite_db::wallet::WalletSqliteDatabase::new(connection, existing.clone())
++            })
++            .and_then(|db| {
++                minotari_wallet::storage::database::WalletBackend::change_passphrase(&db, &existing, &new)
++            });
++        match result {
++            Ok(()) => true,
++            Err(e) => {
++                error!(target: LOG_TARGET, "Could not change the wallet passphrase: {e:?}");
++                *error_out = LibWalletError::from(WalletError::WalletStorageError(e)).code;
 +                false
 +            },
 +        }

@@ -43,6 +43,8 @@ struct BackupView: View {
 
 struct LockedView: View {
     @Environment(AppModel.self) private var model
+    @State private var password = ""
+    @State private var confirmation = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -57,22 +59,69 @@ struct LockedView: View {
                         .overlay(Circle().stroke(Theme.background, lineWidth: 3))
                         .offset(x: 4, y: 4)
                 }
+            if model.needsPasswordSwitch { switchToPassword } else { unlock }
+            Spacer()
+        }
+        .padding(.horizontal, 40)
+        .overlay { if model.busy { ProgressView().offset(y: 160) } }
+        .onChange(of: model.phase) { password = ""; confirmation = "" }
+    }
+
+    private var unlock: some View {
+        VStack(spacing: 0) {
             Text("Clew is locked")
                 .font(.title2.weight(.semibold))
                 .padding(.top, 20)
             Text(model.wallets.count == 1 ? "1 wallet" : "\(model.wallets.count) wallets")
                 .foregroundStyle(.secondary)
                 .padding(.top, 2)
-            Button { Task { await model.unlock() } } label: {
-                Label("Unlock", systemImage: "touchid")
+            SecureField("Password", text: $password)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 240)
+                .padding(.top, 24)
+                .onSubmit(submit)
+            Button("Unlock", action: submit)
+                .buttonStyle(.wide)
+                .keyboardShortcut(.defaultAction)
+                .frame(width: 240)
+                .padding(.top, 10)
+                .disabled(model.busy)
+            if model.touchIDEnabled {
+                Button { Task { await model.unlock(password: nil) } } label: {
+                    Label("Use Touch ID", systemImage: "touchid")
+                }
+                .buttonStyle(.borderless)
+                .padding(.top, 12)
+                .disabled(model.busy)
+            }
+        }
+    }
+
+    private func submit() {
+        let typed = password
+        password = ""
+        Task { await model.unlock(password: typed) }
+    }
+
+    /// Shown once, for wallets made before passwords: choose a password, confirm with Touch ID or
+    /// the Mac password one last time, and every wallet is re-encrypted with it.
+    private var switchToPassword: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Choose a password")
+                .font(.title2.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.top, 20)
+            Text("Clew now uses a password instead of the Keychain. Pick one, and your wallets will be switched over. macOS will ask for Touch ID or your Mac password one last time.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            NewPasswordFields(password: $password, confirmation: $confirmation)
+            Button("Switch to password") {
+                let chosen = password
+                Task { await model.switchToPassword(chosen) }
             }
             .buttonStyle(.wide)
-            .keyboardShortcut(.defaultAction)
-            .frame(width: 200)
-            .padding(.top, 28)
-            .disabled(model.busy)
-            Spacer()
+            .disabled(model.busy || !NewPasswordFields.isValid(password, confirmation))
         }
-        .overlay { if model.busy { ProgressView().offset(y: 120) } }
+        .frame(width: 320)
     }
 }

@@ -7,13 +7,21 @@ struct TariError: LocalizedError, Equatable {
 
     /// Not from the library: the wallet was already closed (locked or switched) when it was used.
     static let closed = TariError(code: -2)
+    /// Not from the library: the password didn't open the wallet.
+    static let wrongPassword = TariError(code: -3)
+
+    /// Only the library's "invalid passphrase" (428) means the password was wrong. Other decryption
+    /// errors (420, 423, 429) can have other causes, so they're never taken as a wrong password.
+    var isWrongPassword: Bool { code == -3 || code == 428 }
 
     var errorDescription: String? {
         switch code {
         case -2: "This wallet was closed (Clew locked or switched wallets). Nothing was sent."
+        case -3: "That password isn't right."
         case 101: "Not enough funds for this amount plus the fee."
         case 115: "Funds are still pending. Wait for incoming transactions to confirm."
-        case 420, 423, 428, 429: "The wallet could not be decrypted."
+        case 428: "That password isn't right."
+        case 420, 423, 429: "The wallet couldn't be decrypted (error \(code))."
         default: "Wallet error \(code)."
         }
     }

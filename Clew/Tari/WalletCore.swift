@@ -127,6 +127,22 @@ final class WalletCore {
         return error
     }
 
+    /// Changes the password of a wallet that isn't open, without starting it (so nothing goes
+    /// online). A wrong `old` password changes nothing and throws `TariError.wrongPassword`.
+    /// Changing to the same password is a cheap way to check a password. Slow (deliberately), so
+    /// call it off the main thread.
+    static func changePassword(directory: URL, from old: String, to new: String) throws {
+        guard let config = try ffi({ wallet_db_config_create("clew", directory.path, $0) }) else {
+            throw TariError(code: -1)
+        }
+        defer { wallet_db_config_destroy(config) }
+        do {
+            _ = try ffi { wallet_change_passphrase(config, old, new, $0) }
+        } catch let error as TariError where error.isWrongPassword {
+            throw TariError.wrongPassword
+        }
+    }
+
     /// Routes all wallet network traffic through a SOCKS proxy (nil = direct). The library makes a
     /// new connection client for each request, so this applies to running wallets from their next
     /// request. If the proxy is unreachable, the wallet goes offline instead of bypassing it.

@@ -6,9 +6,19 @@ struct WalletProfile: Codable, Identifiable, Equatable {
     let id: UUID
     var name: String
     var folder: String            // subfolder of the network directory
-    var keychainAccount: String
+    var keychainAccount: String     // only for wallets made before passwords (0.6 and earlier)
     var backedUp: Bool
     var created: Date
+    /// True once the wallet is encrypted with the user's password. Older wallets used a random
+    /// passphrase kept in the Keychain until they're switched over.
+    var usesPassword: Bool? = nil
+    /// Which password the wallet is on. Every password change gives the wallets it re-encrypts the
+    /// next number, so after an interrupted change Clew knows which password is the newest.
+    /// -1 means an earlier password Clew can't identify.
+    var passwordGeneration: Int? = nil
+
+    var needsPasswordSwitch: Bool { usesPassword != true }
+    var generation: Int { passwordGeneration ?? 0 }
 }
 
 /// The list of wallets on this Mac for the current network, saved as wallets.json.

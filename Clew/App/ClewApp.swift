@@ -24,4 +24,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Closing the window quits, which also closes the wallet.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    // Never quit half-way through re-encrypting wallet files.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard AppModel.isRekeying else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "Clew is updating your wallet password"
+        alert.informativeText = "This takes a few seconds per wallet. Quit again once it's done."
+        alert.runModal()
+        return .terminateCancel
+    }
 }

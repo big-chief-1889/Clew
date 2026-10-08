@@ -2,11 +2,8 @@ import Foundation
 import LocalAuthentication
 import Security
 
-/// Holds each wallet's database passphrase in the Keychain.
-///
-/// Items are bound to this Mac (never synced to iCloud) and macOS itself refuses to
-/// release them without Touch ID or the login password, so an attacker who copies the
-/// wallet files can't decrypt them.
+/// Reads the Keychain keys that wallets made before passwords (Clew 0.6 and earlier) were
+/// encrypted with, so they can be switched to the password once, and then deletes them.
 enum Vault {
     enum Failure: LocalizedError {
         case keychain(OSStatus), cancelled, missing
@@ -21,32 +18,6 @@ enum Vault {
     }
 
     private static let service = "app.clew.wallet"
-
-    /// Creates a new random passphrase and stores it under `account`, replacing any existing one.
-    static func createPassphrase(account: String) throws -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
-            throw Failure.keychain(errSecAllocate)
-        }
-        let passphrase = Data(bytes).base64EncodedString()
-
-        var accessError: Unmanaged<CFError>?
-        guard let access = SecAccessControlCreateWithFlags(
-            nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .userPresence, &accessError)
-        else { throw accessError!.takeRetainedValue() as Error }
-
-        try? deletePassphrase(account: account)
-        let status = SecItemAdd([
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: account,
-            kSecAttrAccessControl: access,
-            kSecUseDataProtectionKeychain: true,
-            kSecValueData: Data(passphrase.utf8),
-        ] as CFDictionary, nil)
-        guard status == errSecSuccess else { throw Failure.keychain(status) }
-        return passphrase
-    }
 
     /// Asks for Touch ID (or the Mac password) once and returns a session that can read
     /// wallet passphrases without asking again, until it's dropped.
@@ -95,14 +66,5 @@ enum Vault {
             kSecUseDataProtectionKeychain: true,
         ] as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw Failure.keychain(status) }
-    }
-
-    /// A fresh Touch ID / password check, used before sending or revealing the seed words.
-    static func confirmOwner(reason: String) async throws {
-        do {
-            try await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
-        } catch {
-            throw Failure.cancelled
-        }
     }
 }

@@ -118,3 +118,60 @@ private struct PrivateWindow: NSViewRepresentable {
     func makeNSView(context: Context) -> Marker { Marker() }
     func updateNSView(_ view: Marker, context: Context) {}
 }
+
+extension View {
+    /// Asks for the Clew password in a small dialog, then calls `submit` with what was typed.
+    func passwordPrompt(_ title: String, message: String = "Enter your Clew password.",
+                        isPresented: Binding<Bool>, submit: @escaping (String) -> Void) -> some View {
+        modifier(PasswordPrompt(title: title, message: message, isPresented: isPresented, submit: submit))
+    }
+}
+
+private struct PasswordPrompt: ViewModifier {
+    let title: String
+    let message: String
+    @Binding var isPresented: Bool
+    let submit: (String) -> Void
+    @State private var password = ""
+
+    func body(content: Content) -> some View {
+        content.alert(title, isPresented: $isPresented) {
+            SecureField("Password", text: $password)
+            Button("OK") {
+                let typed = password
+                password = ""
+                submit(typed)
+            }
+            .keyboardShortcut(.defaultAction)
+            Button("Cancel", role: .cancel) { password = "" }
+        } message: {
+            Text(message)
+        }
+    }
+}
+
+/// Two fields for choosing a password. Any length is allowed; the two just have to match.
+struct NewPasswordFields: View {
+    @Binding var password: String
+    @Binding var confirmation: String
+
+    static func isValid(_ password: String, _ confirmation: String) -> Bool { password == confirmation }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SecureField("Password", text: $password)
+            SecureField("Type it again", text: $confirmation)
+            if !confirmation.isEmpty && password != confirmation {
+                Text("The two passwords don't match.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else {
+                Text("You'll need it to open Clew and to send. If you forget it, restore your wallets from their recovery words.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .textFieldStyle(.roundedBorder)
+    }
+}

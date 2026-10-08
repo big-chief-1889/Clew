@@ -47,7 +47,7 @@ cargo build --manifest-path "$TARI/Cargo.toml" --release --locked \
   -p minotari_wallet_ffi --target aarch64-apple-darwin
 
 mkdir -p "$OUT"
-cp "$TARI/target/aarch64-apple-darwin/release/libminotari_wallet_ffi.a" "$OUT/"
+cp "${CARGO_TARGET_DIR:-$TARI/target}/aarch64-apple-darwin/release/libminotari_wallet_ffi.a" "$OUT/"
 cp "$TARI/base_layer/wallet_ffi/wallet.h" "$OUT/"
 echo "$NETWORK $TARI_TAG $(git -C "$TARI" rev-parse --short HEAD)" > "$OUT/BUILD_INFO"
 

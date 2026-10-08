@@ -31,6 +31,11 @@ struct WalletSidebar: View {
     @Environment(AppModel.self) private var model
     let close: () -> Void
     let add: (AddWalletSheet.Mode) -> Void
+    /// The wallet being deleted. Kept separately from the dialogs, which clear their own flags.
+    @State private var deleting: WalletProfile?
+    @State private var confirming = false
+    @State private var askingPassword = false
+    @State private var error: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -72,6 +77,28 @@ struct WalletSidebar: View {
             Rectangle().fill(.white.opacity(0.06)).frame(width: 1)
         }
         .onExitCommand(perform: close)
+        .confirmationDialog("Delete “\(deleting?.name ?? "wallet")”?", isPresented: $confirming) {
+            Button("Delete wallet", role: .destructive) { Task { await delete() } }
+        } message: {
+            Text("The XTM in it can only be recovered with its 24 recovery words. Make sure you have them.")
+        }
+        .passwordPrompt("Delete “\(deleting?.name ?? "wallet")”", isPresented: $askingPassword) { typed in
+            Task { await delete(password: typed) }
+        }
+        .alert("Couldn't delete", isPresented: .init(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("OK") {}
+        } message: { Text(error ?? "") }
+    }
+
+    private func delete(password: String? = nil) async {
+        guard let wallet = deleting else { return }
+        do {
+            _ = try await model.deleteWallet(wallet.id, password: password)
+        } catch is AppModel.PasswordNeeded {
+            askingPassword = true
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 
     private func row(_ wallet: WalletProfile) -> some View {
@@ -104,6 +131,12 @@ struct WalletSidebar: View {
         }
         .buttonStyle(.plain)
         .disabled(model.busy)
+        .contextMenu {
+            Button("Delete “\(wallet.name)”…", role: .destructive) {
+                deleting = wallet
+                confirming = true
+            }
+        }
     }
 
     private func action(_ title: String, icon: String, perform: @escaping () -> Void) -> some View {

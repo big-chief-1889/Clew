@@ -9,6 +9,13 @@ struct WalletSettingsView: View {
     @State private var seedWords: [String]?
     @State private var repairStarted = false
     @State private var confirmingDelete = false
+    /// Which action is waiting for the password to be typed. Kept separately from the prompt's flag.
+    @State private var passwordFor: Guarded?
+    @State private var askingPassword = false
+    @State private var showingPasswordChange = false
+    @State private var error: String?
+
+    private enum Guarded { case reveal, delete }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,9 +44,7 @@ struct WalletSettingsView: View {
                             self.seedWords = nil
                         }
                     } else {
-                        Button("Show recovery words…") {
-                            Task { seedWords = try? await model.revealSeedWords() }
-                        }
+                        Button("Show recovery words…") { Task { await reveal() } }
                     }
                 } header: {
                     Text("Recovery words")
@@ -48,6 +53,20 @@ struct WalletSettingsView: View {
                         Label("Not backed up yet", systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
                     }
+                }
+
+                Section {
+                    Button("Change password…") { showingPasswordChange = true }
+                        .disabled(model.busy)
+                    if TouchIDShortcut.isAvailable {
+                        Toggle("Unlock with Touch ID", isOn: .init(
+                            get: { model.touchIDEnabled },
+                            set: { model.setTouchID($0) }))
+                    }
+                } header: {
+                    Text("Password (all wallets)")
+                } footer: {
+                    Text("Touch ID is a shortcut: your password still protects the wallet files, and always works.")
                 }
 
                 Section {
@@ -126,9 +145,20 @@ struct WalletSettingsView: View {
         }
         .onDisappear { seedWords = nil }
         .onChange(of: model.phase) { dismiss() }
+        .passwordPrompt(passwordFor == .delete ? "Delete wallet" : "Show recovery words",
+                        isPresented: $askingPassword) { typed in
+            let action = passwordFor
+            Task { action == .delete ? await delete(password: typed) : await reveal(password: typed) }
+        }
+        .sheet(isPresented: $showingPasswordChange) {
+            ChangePasswordView().presentationBackground(Theme.background)
+        }
+        .alert("Something went wrong", isPresented: .init(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("OK") {}
+        } message: { Text(error ?? "") }
         .confirmationDialog("Delete “\(model.activeWallet?.name ?? "wallet")”?", isPresented: $confirmingDelete) {
             Button("Delete wallet", role: .destructive) {
-                Task { if await model.deleteActiveWallet() { dismiss() } }
+                Task { await delete() }
             }
         } message: {
             Text("The XTM in it can only be recovered with its 24 recovery words. Make sure you have them.")
@@ -137,6 +167,63 @@ struct WalletSettingsView: View {
 
     private func commitName() {
         if let id = model.activeID { model.rename(id, to: name) }
+    }
+
+    private func reveal(password: String? = nil) async {
+        do {
+            seedWords = try await model.revealSeedWords(password: password)
+        } catch is AppModel.PasswordNeeded {
+            passwordFor = .reveal
+            askingPassword = true
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func delete(password: String? = nil) async {
+        do {
+            guard let id = model.activeID else { return }
+            if try await model.deleteWallet(id, password: password) { dismiss() }
+        } catch is AppModel.PasswordNeeded {
+            passwordFor = .delete
+            askingPassword = true
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+}
+
+/// Current password, then the new one twice.
+private struct ChangePasswordView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @State private var current = ""
+    @State private var new = ""
+    @State private var confirmation = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Change password").font(.title3.weight(.semibold))
+            SecureField("Current password", text: $current)
+                .textFieldStyle(.roundedBorder)
+            Text("New password").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+            NewPasswordFields(password: $new, confirmation: $confirmation)
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Change") {
+                    Task { if await model.changePassword(current: current, new: new) { dismiss() } }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(model.busy || !NewPasswordFields.isValid(new, confirmation))
+            }
+        }
+        .padding(24)
+        .frame(width: 380)
+        .overlay { if model.busy { ProgressView() } }
+        .onDisappear { current = ""; new = ""; confirmation = "" }
     }
 }
 

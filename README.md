@@ -2,11 +2,11 @@
 
 Small, private wallet for [Tari](https://tari.com) (XTM) on the Mac. It runs Tari's own wallet library and sends everything over Tor.
 
-Make a wallet or restore one from your 24 words, then send and receive XTM. Your keys stay on your Mac, locked behind Touch ID.
+Make a wallet or restore one from your 24 words, then send and receive XTM. Your keys stay on your Mac, locked with your password.
 
 - create or restore wallets from 24 recovery words, and keep as many as you want side by side
 - send and receive one-sided (stealth) payments, with a QR code for your address
-- the wallet file is encrypted and its passphrase lives in the Keychain behind Touch ID
+- wallet files are encrypted with your password, and Touch ID can be turned on as a shortcut
 - all wallet traffic goes over Tor by default (Arti is built in). If Tor is down it stays offline instead of connecting directly
 - only talks to the node you pick (`rpc.tari.com` by default), no silent fallback to another server
 - fees come from the node's mempool when the network is busy, capped at 100 µT per gram
@@ -20,23 +20,39 @@ Runs on:
 
 > **Heads up:** Clew hasn't been audited. Start with small amounts and keep your 24 words on paper.
 
+## Download
+
+Get the latest build from Releases. Unzip it and drag Clew to Applications.
+
+The app isn't notarized by Apple, so the first time you open it macOS will block it. Go to System Settings > Privacy & Security, scroll down and click Open Anyway.
+
+Check the download against `SHA256SUMS.txt` from the same release:
+
+```sh
+shasum -a 256 Clew-*-mac.zip
+```
+
 ## Building
 
-You need Xcode, Rust (`rustup`), `protobuf` and `xcodegen` from Homebrew, and an Apple Development signing certificate set up in Xcode.
+You need Xcode, Rust (`rustup`), and `protobuf` and `xcodegen` from Homebrew.
 
 ```sh
 brew install protobuf xcodegen
 git clone --depth 1 --branch v6.1.0 https://github.com/tari-project/tari.git vendor/tari
 scripts/build-ffi.sh mainnet
 scripts/build-arti.sh
-scripts/install.sh
+scripts/release.sh
 ```
 
-- `build-ffi.sh` applies `patches/tari-v6.1.0-clew.patch` to Tari and builds its wallet library (`minotari_wallet_ffi`) into `Frameworks/TariFFI`. It also writes `Clew/App/Config.swift` for the network you picked
-- `build-arti.sh` builds Arti 2.6.0 from crates.io with `--locked` and signs it as a sandboxed helper
-- `install.sh` generates the Xcode project, builds a Release copy and puts it in /Applications. Your team ID isn't stored in the repo, `scripts/generate-project.sh` reads it from your signing certificate
+Builds `build/release/Clew-<version>-mac.zip`, the same thing that goes in a release. No Apple developer account needed.
 
-For testnet (Esmeralda) run `scripts/build-ffi.sh esme` and then `scripts/install.sh`. Each network keeps its own wallets, Keychain items and settings, so they never mix.
+- `build-ffi.sh` applies `patches/tari-v6.1.0-clew.patch` to Tari and builds its wallet library (`minotari_wallet_ffi`) into `Frameworks/TariFFI`. It also writes `Clew/App/Config.swift` for the network you picked
+- `build-arti.sh` builds Arti 2.6.0 from crates.io with `--locked`
+- `release.sh` rebuilds both with your home folder remapped out of the file paths, builds Clew, signs it ad-hoc, and scans every file in the app for your username and home folder before zipping it. Add more things to look for with `CLEW_RELEASE_FORBIDDEN="Your Name|you@example.com" scripts/release.sh`
+
+If you have an Apple Development certificate, `scripts/install.sh` builds a copy signed with it and puts it straight in /Applications. Your team ID isn't stored in the repo, `scripts/generate-project.sh` reads it from your certificate. Wallets made with Clew 0.6 or earlier need this signed copy once, to switch from the Keychain to a password.
+
+For testnet (Esmeralda) run `scripts/build-ffi.sh esme` and then `scripts/install.sh`. Each network keeps its own wallets and settings, so they never mix.
 
 If you change Tari's source, regenerate the patch:
 
@@ -54,12 +70,15 @@ Checks for a newer stable Tari release and an Arti release that's at least two w
 
 ## Notes
 
-- The patch adds `wallet_set_http_proxy` to Tari's FFI and stops the wallet falling back to Tari's own server when your node doesn't answer.
+- The patch adds `wallet_set_http_proxy` and `wallet_change_passphrase` to Tari's FFI, and stops the wallet falling back to Tari's own server when your node doesn't answer.
 - Tari's wallet makes a new HTTP client for every request, so the proxy setting applies right away. Each wallet uses its own SOCKS username, so Tor gives it separate circuits.
 - The node still sees the transactions you send, just not your IP. Running your own node fixes that. Set its address in wallet settings (https, or http for localhost and .onion).
-- Wallets live in `~/Library/Containers/app.clew.wallet/Data/Library/Application Support/Clew/<network>/`, one folder per wallet, listed in `wallets.json`. Each one has its own Keychain item.
-- Keys and the seed are encrypted inside the wallet database, but the transaction history isn't. The app sandbox and FileVault are what protect it.
-- One unlock opens all your wallets until Clew locks (sleep, screen lock, or the lock button). Sending, showing recovery words and deleting a wallet ask for Touch ID again.
+- Wallets live in `~/Library/Containers/app.clew.wallet/Data/Library/Application Support/Clew/<network>/`, one folder per wallet, listed in `wallets.json`.
+- Your password encrypts the keys and seed inside each wallet database (Tari uses Argon2id for this). The transaction history isn't encrypted, so the app sandbox and FileVault are what protect it. There's no minimum length, so how strong it is is up to you.
+- One unlock opens all your wallets until Clew locks (sleep, screen lock, or the lock button). Sending, showing recovery words and deleting a wallet ask for the password again.
+- The Touch ID shortcut encrypts your password to a key in the Mac's Secure Enclave, so it only works on that Mac, and only with a fingerprint (not the Mac's login password). It doesn't need the Keychain or a developer certificate.
+- Changing the password re-encrypts the wallet's key, not the whole file, so an older backup of a wallet (Time Machine etc.) still opens with the password it had back then.
+- Forget the password and the only way back in is your recovery words.
 - `scripts/make-icon.swift` draws the icon.
 
 ## License
