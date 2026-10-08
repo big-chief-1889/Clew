@@ -1,14 +1,18 @@
 #!/bin/bash
-# Builds the Tari wallet library (libminotari_wallet_ffi) for Apple Silicon Macs
-# and copies it, with its C header, into Frameworks/TariFFI where Xcode picks it up.
+# Builds Clew's wallet library (rust/clew-core: Tari's wallet library plus the Ootle wallet) for
+# Apple Silicon Macs and copies it, with its C headers, into Frameworks/TariFFI where Xcode picks
+# it up.
 #
 # Usage: scripts/build-ffi.sh [esme|mainnet]   (default: esme = testnet)
 set -euo pipefail
 
 NETWORK="${1:-esme}"
 TARI_TAG="v6.1.0"
+OOTLE_TAG="v0.45.0"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARI="$ROOT/vendor/tari"
+OOTLE="$ROOT/vendor/tari-ootle"
+CORE="$ROOT/rust/clew-core"
 OUT="$ROOT/Frameworks/TariFFI"
 
 case "$NETWORK" in
@@ -21,35 +25,42 @@ case "$NETWORK" in
   *) echo "unknown network: $NETWORK" >&2; exit 1 ;;
 esac
 
-# Refuse to build from anything other than the pinned release.
-actual="$(git -C "$TARI" describe --tags --exact-match 2>/dev/null || true)"
-if [ "$actual" != "$TARI_TAG" ]; then
-  echo "vendor/tari is at '${actual:-untagged}', expected $TARI_TAG" >&2
-  exit 1
-fi
-
-# Clew's changes to Tari (Tor proxy support, no silent fallback node). Applied once.
-PATCH="$ROOT/patches/tari-$TARI_TAG-clew.patch"
-if git -C "$TARI" apply --reverse --check "$PATCH" 2>/dev/null; then
-  echo "Clew patch already applied"
-else
-  git -C "$TARI" apply "$PATCH"
-  echo "Applied $PATCH"
-fi
-# The patch adds a dependency between two Tari crates. Record just that in Cargo.lock (no outside
-# crate changes version), then build strictly from the lockfile.
+# Refuse to build from anything other than the pinned releases, then apply Clew's changes once:
+# Tari gets Tor proxy support and no silent fallback node, Ootle gets Tor proxy support.
+use_release() { # folder tag patch
+  local actual
+  actual="$(git -C "$1" describe --tags --exact-match 2>/dev/null || true)"
+  if [ "$actual" != "$2" ]; then
+    echo "${1#$ROOT/} is at '${actual:-untagged}', expected $2" >&2
+    exit 1
+  fi
+  if git -C "$1" apply --reverse --check "$3" 2>/dev/null; then
+    echo "Clew patch already applied to ${1#$ROOT/}"
+  else
+    git -C "$1" apply -N "$3"   # -N: new files show up in git diff
+    echo "Applied ${3#$ROOT/}"
+  fi
+}
+use_release "$TARI" "$TARI_TAG" "$ROOT/patches/tari-$TARI_TAG-clew.patch"
+use_release "$OOTLE" "$OOTLE_TAG" "$ROOT/patches/tari-ootle-$OOTLE_TAG-clew.patch"
+# The Tari patch adds a dependency between two Tari crates. Record just that in Tari's Cargo.lock
+# (no outside crate changes version); it is what generates wallet.h below.
 cargo update --manifest-path "$TARI/Cargo.toml" --workspace --offline --quiet
 # Regenerate wallet.h from the current source (the generator only reruns when build.rs changes).
 touch "$TARI/base_layer/wallet_ffi/build.rs"
 
 export MACOSX_DEPLOYMENT_TARGET=14.0
-cargo build --manifest-path "$TARI/Cargo.toml" --release --locked \
-  -p minotari_wallet_ffi --target aarch64-apple-darwin
+# clew-core's own Cargo.lock pins every outside crate; build strictly from it.
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/build/clew-core-target}"
+CARGO_TARGET_DIR="$TARGET_DIR" cargo build --manifest-path "$CORE/Cargo.toml" --release --locked \
+  --target aarch64-apple-darwin
 
 mkdir -p "$OUT"
-cp "${CARGO_TARGET_DIR:-$TARI/target}/aarch64-apple-darwin/release/libminotari_wallet_ffi.a" "$OUT/"
-cp "$TARI/base_layer/wallet_ffi/wallet.h" "$OUT/"
-echo "$NETWORK $TARI_TAG $(git -C "$TARI" rev-parse --short HEAD)" > "$OUT/BUILD_INFO"
+rm -f "$OUT/libminotari_wallet_ffi.a"
+cp "$TARGET_DIR/aarch64-apple-darwin/release/libclew_core.a" "$OUT/"
+cp "$TARI/base_layer/wallet_ffi/wallet.h" "$CORE/include/clew_ootle.h" "$OUT/"
+echo "$NETWORK tari $TARI_TAG $(git -C "$TARI" rev-parse --short HEAD), ootle $OOTLE_TAG $(git -C "$OOTLE" rev-parse --short HEAD)" \
+  > "$OUT/BUILD_INFO"
 
 # The app's network settings must match the library, so generate them here.
 cat > "$ROOT/Clew/App/Config.swift" <<EOF

@@ -39,6 +39,7 @@ You need Xcode, Rust (`rustup`), and `protobuf` and `xcodegen` from Homebrew.
 ```sh
 brew install protobuf xcodegen
 git clone --depth 1 --branch v6.1.0 https://github.com/tari-project/tari.git vendor/tari
+git clone --depth 1 --branch v0.45.0 https://github.com/tari-project/tari-ootle.git vendor/tari-ootle
 scripts/build-ffi.sh mainnet
 scripts/build-arti.sh
 scripts/release.sh
@@ -46,7 +47,7 @@ scripts/release.sh
 
 Builds `build/release/Clew-<version>-mac.zip`, the same thing that goes in a release. No Apple developer account needed.
 
-- `build-ffi.sh` applies `patches/tari-v6.1.0-clew.patch` to Tari and builds its wallet library (`minotari_wallet_ffi`) into `Frameworks/TariFFI`. It also writes `Clew/App/Config.swift` for the network you picked
+- `build-ffi.sh` applies Clew's patches to Tari and Ootle and builds `rust/clew-core` into `Frameworks/TariFFI`. That's Tari's wallet library (`minotari_wallet_ffi`) plus a wallet for Ootle, Tari's layer 2, which the app doesn't use yet. It also writes `Clew/App/Config.swift` for the network you picked
 - `build-arti.sh` builds Arti 2.6.0 from crates.io with `--locked`
 - `release.sh` rebuilds both with your home folder remapped out of the file paths, builds Clew, signs it ad-hoc, and scans every file in the app for your username and home folder before zipping it. Add more things to look for with `CLEW_RELEASE_FORBIDDEN="Your Name|you@example.com" scripts/release.sh`
 
@@ -54,10 +55,11 @@ If you have an Apple Development certificate, `scripts/install.sh` builds a copy
 
 For testnet (Esmeralda) run `scripts/build-ffi.sh esme` and then `scripts/install.sh`. Each network keeps its own wallets and settings, so they never mix.
 
-If you change Tari's source, regenerate the patch:
+If you change Tari's or Ootle's source, regenerate the patch:
 
 ```sh
 git -C vendor/tari diff -- . ':(exclude)Cargo.lock' ':(exclude)base_layer/wallet_ffi/wallet.h' > patches/tari-v6.1.0-clew.patch
+git -C vendor/tari-ootle diff > patches/tari-ootle-v0.45.0-clew.patch
 ```
 
 ## Updating
@@ -66,7 +68,7 @@ git -C vendor/tari diff -- . ':(exclude)Cargo.lock' ':(exclude)base_layer/wallet
 scripts/update.sh
 ```
 
-Checks for a newer stable Tari release and an Arti release that's at least two weeks old. If there is one it rebuilds it, has a throwaway mainnet wallet sync through the new Tor (`scripts/check-wallet.sh`), and only then installs. If anything fails it puts every file back and leaves the installed app alone. If the patch no longer applies to a new Tari release it stops and tells you.
+Checks for a newer stable Tari release and an Arti release that's at least two weeks old. If there is one it rebuilds it, has a throwaway mainnet wallet sync through the new Tor (`scripts/check-wallet.sh`), and only then installs. If anything fails it puts every file back and leaves the installed app alone. If the patch no longer applies to a new Tari release it stops and tells you. Ootle isn't updated this way while it's pre-release; it moves by hand.
 
 ## Notes
 
@@ -83,4 +85,4 @@ Checks for a newer stable Tari release and an Arti release that's at least two w
 
 ## License
 
-BSD 3-Clause, see [LICENSE](LICENSE). Tari is BSD 3-Clause too, and `patches/` holds changes to Tari's code under its license. Arti is MIT or Apache 2.0.
+BSD 3-Clause, see [LICENSE](LICENSE). Tari and Ootle are BSD 3-Clause too, and `patches/` holds changes to their code under that license. Arti is MIT or Apache 2.0.

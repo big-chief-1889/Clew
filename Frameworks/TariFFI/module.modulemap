@@ -1,5 +1,6 @@
 module TariFFI {
     header "wallet.h"
-    link "minotari_wallet_ffi"
+    header "clew_ootle.h"
+    link "clew_core"
     export *
 }

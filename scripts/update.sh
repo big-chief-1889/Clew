@@ -10,6 +10,9 @@
 # 3. Checks a throwaway wallet connects and syncs through the new Tor (scripts/check-wallet.sh).
 # 4. Builds and installs Clew.
 # If any step fails, every file is put back and the installed Clew is left untouched.
+#
+# Ootle (vendor/tari-ootle) isn't updated here: it is pre-release, with breaking changes most
+# weeks, so it moves only by hand (OOTLE_TAG in build-ffi.sh plus its patch).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -68,7 +71,7 @@ fi
 # --- Safety net: back up everything this script changes ---------------------------------
 rm -rf "$BACKUP" && mkdir -p "$BACKUP"
 cp -R Frameworks/TariFFI Frameworks/Arti patches "$BACKUP/"
-cp scripts/build-ffi.sh scripts/build-arti.sh Clew/App/Config.swift project.yml "$BACKUP/"
+cp scripts/build-ffi.sh scripts/build-arti.sh Clew/App/Config.swift project.yml rust/clew-core/Cargo.lock "$BACKUP/"
 tari_moved=false
 
 rollback() {
@@ -81,10 +84,11 @@ rollback() {
   cp "$BACKUP/build-ffi.sh" "$BACKUP/build-arti.sh" scripts/
   cp "$BACKUP/Config.swift" Clew/App/
   cp "$BACKUP/project.yml" .
+  cp "$BACKUP/Cargo.lock" rust/clew-core/
   if $tari_moved; then
     git -C "$TARI" reset -q --hard
     git -C "$TARI" checkout -q "$current_tari"
-    git -C "$TARI" apply "patches/tari-$current_tari-clew.patch"
+    git -C "$TARI" apply -N "patches/tari-$current_tari-clew.patch"
   fi
   exit 1
 }
@@ -112,6 +116,10 @@ if $update_tari; then
   git mv -f "$saved" "patches/tari-$latest_tari-clew.patch" 2>/dev/null \
     || mv "$saved" "patches/tari-$latest_tari-clew.patch"
   sed -i '' "s/^TARI_TAG=\".*\"/TARI_TAG=\"$latest_tari\"/" scripts/build-ffi.sh
+  # Let clew-core's lockfile follow the new Tari crates, changing as little else as it can.
+  git -C "$TARI" apply -N "patches/tari-$latest_tari-clew.patch"
+  cargo update --manifest-path "$TARI/Cargo.toml" --workspace --offline --quiet
+  cargo metadata --manifest-path rust/clew-core/Cargo.toml --format-version 1 > /dev/null
   echo "Building Tari's wallet library (this takes a few minutes)…"
   scripts/build-ffi.sh "$build_network" > build/update-ffi.log 2>&1 \
     || { tail -20 build/update-ffi.log; false; }

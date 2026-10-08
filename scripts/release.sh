@@ -29,13 +29,13 @@ export CXXFLAGS="$CFLAGS"
 
 rm -rf "$OUT" && mkdir -p "$STAGE/TariFFI"
 
-echo "Building Tari's wallet library with remapped paths (a few minutes)…"
+echo "Building the wallet library (Tari + Ootle) with remapped paths (a few minutes)…"
 NETWORK="$(sed -n 's/.*static let network = "\(.*\)".*/\1/p' Clew/App/Config.swift)"
 [ "$NETWORK" = mainnet ] && BUILD_NETWORK=mainnet || BUILD_NETWORK=esme
 CARGO_TARGET_DIR="$ROOT/build/release-cargo" scripts/build-ffi.sh "$BUILD_NETWORK" > "$OUT/ffi.log" 2>&1 \
   || { tail -20 "$OUT/ffi.log"; exit 1; }
-cp Frameworks/TariFFI/libminotari_wallet_ffi.a "$STAGE/TariFFI/"
-cp Frameworks/TariFFI/wallet.h Frameworks/TariFFI/module.modulemap "$STAGE/TariFFI/"
+cp Frameworks/TariFFI/libclew_core.a "$STAGE/TariFFI/"
+cp Frameworks/TariFFI/wallet.h Frameworks/TariFFI/clew_ootle.h Frameworks/TariFFI/module.modulemap "$STAGE/TariFFI/"
 
 echo "Building Arti $ARTI_VERSION with remapped paths (a few minutes)…"
 CARGO_TARGET_DIR="$ROOT/build/release-arti-target" cargo install arti --version "$ARTI_VERSION" --locked \
