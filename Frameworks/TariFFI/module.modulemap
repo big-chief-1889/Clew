@@ -1,0 +1,5 @@
+module TariFFI {
+    header "wallet.h"
+    link "minotari_wallet_ffi"
+    export *
+}

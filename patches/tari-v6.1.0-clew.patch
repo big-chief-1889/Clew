@@ -1,0 +1,131 @@
+diff --git a/base_layer/wallet_ffi/Cargo.toml b/base_layer/wallet_ffi/Cargo.toml
+index aeaf153..cf6d6ae 100644
+--- a/base_layer/wallet_ffi/Cargo.toml
++++ b/base_layer/wallet_ffi/Cargo.toml
+@@ -21,6 +21,7 @@ tari_shutdown = { workspace = true }
+ tari_utilities = { workspace = true }
+ tari_transaction_components = { workspace = true}
+ minotari_wallet = { workspace = true, features = ["c_integration"] }
++minotari_node_wallet_client = { workspace = true }
+ tari_transaction_key_manager = { workspace = true }
+ 
+ chacha20poly1305 = "0.10.1"
+diff --git a/base_layer/wallet_ffi/src/lib.rs b/base_layer/wallet_ffi/src/lib.rs
+index afe0661..645c546 100644
+--- a/base_layer/wallet_ffi/src/lib.rs
++++ b/base_layer/wallet_ffi/src/lib.rs
+@@ -6559,6 +6559,8 @@ pub unsafe extern "C" fn wallet_create(
+             override_from: None,
+             transaction_service_config: TransactionServiceConfig { ..Default::default() },
+             network,
++            // Only ever talk to the node the app chose; no silent fallback to a default server.
++            fallback_http_server_url: http_base_node.clone(),
+             http_server_url: http_base_node,
+             birthday_offset: wallet_birthday_offset,
+             ..Default::default()
+@@ -9610,6 +9612,48 @@ pub unsafe extern "C" fn log_debug_message(msg: *const c_char, error_out: *mut c
+     }
+ }
+ 
++/// Routes all base node requests through a proxy, including those of wallets already running (the
++/// wallet creates a new HTTP client for each request).
++///
++/// ## Arguments
++/// `proxy` - A proxy URL such as `socks5h://127.0.0.1:9150` (Tor; `socks5h` resolves names through the proxy),
++/// or null to connect directly. If the proxy can't be reached, requests fail rather than bypassing it.
++/// `error_out` - Pointer to an int which will be modified to an error code should one occur, may not be null.
++///
++/// ## Returns
++/// `bool` - true if the setting was applied.
++///
++/// # Safety
++/// `proxy` must be null or a valid nul-terminated string.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn wallet_set_http_proxy(proxy: *const c_char, error_out: *mut c_int) -> bool {
++    unsafe {
++        if error_out.is_null() {
++            return false;
++        }
++        *error_out = 0;
++        let proxy = if proxy.is_null() {
++            None
++        } else {
++            match CStr::from_ptr(proxy).to_str() {
++                Ok(s) => Some(s.to_owned()),
++                Err(_) => {
++                    *error_out = LibWalletError::from(InterfaceError::PointerError("proxy".to_string())).code;
++                    return false;
++                },
++            }
++        };
++        match minotari_node_wallet_client::http::set_http_proxy(proxy) {
++            Ok(()) => true,
++            Err(e) => {
++                error!(target: LOG_TARGET, "Invalid proxy: {e}");
++                *error_out = LibWalletError::from(InterfaceError::InvalidArgument("proxy".to_string())).code;
++                false
++            },
++        }
++    }
++}
++
+ /// ------------------------------------- FeePerGramStats ------------------------------------ ///
+ /// Get the TariFeePerGramStats from a TariWallet.
+ ///
+diff --git a/clients/rust/base_node_wallet_client/Cargo.toml b/clients/rust/base_node_wallet_client/Cargo.toml
+index ee87a51..b13d577 100644
+--- a/clients/rust/base_node_wallet_client/Cargo.toml
++++ b/clients/rust/base_node_wallet_client/Cargo.toml
+@@ -15,7 +15,7 @@ tari_utilities = { workspace = true }
+ tari_shutdown = { workspace = true }
+ anyhow = { workspace = true }
+ url = { version = "2.5.4", features = ["default", "serde"] }
+-reqwest = { version = "0.12", features = ["default", "json"] }
++reqwest = { version = "0.12", features = ["default", "json", "socks"] }
+ async-trait = "0.1.88"
+ tokio = { workspace = true, features = ["macros", "sync"] }
+ log = { workspace = true, features = [] }
+diff --git a/clients/rust/base_node_wallet_client/src/client/http.rs b/clients/rust/base_node_wallet_client/src/client/http.rs
+index fa037b0..349fcd1 100644
+--- a/clients/rust/base_node_wallet_client/src/client/http.rs
++++ b/clients/rust/base_node_wallet_client/src/client/http.rs
+@@ -66,6 +66,20 @@ fn check_query_size(len: usize, item_name: &str) -> Result<(), anyhow::Error> {
+     Ok(())
+ }
+ 
++/// Proxy for every base node request, e.g. `socks5h://127.0.0.1:9150` for Tor. Set by the host app.
++static HTTP_PROXY: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
++
++/// Routes base node requests through `proxy` (or directly when `None`). The wallet creates a client per
++/// request, so this applies to running wallets from their next request. With a proxy set, requests that
++/// can't reach it fail rather than connecting directly.
++pub fn set_http_proxy(proxy: Option<String>) -> Result<(), anyhow::Error> {
++    if let Some(proxy) = &proxy {
++        reqwest::Proxy::all(proxy)?;
++    }
++    *HTTP_PROXY.write().map_err(|_| anyhow!("proxy setting lock poisoned"))? = proxy;
++    Ok(())
++}
++
+ /// HTTP client for the Base Node wallet service.
+ pub struct Client {
+     local_api_address: Url,
+@@ -77,7 +91,17 @@ pub struct Client {
+ 
+ impl Client {
+     pub fn new(local_api_address: Url, default_seed_address: Url) -> Self {
+-        let http_client_builder = reqwest::Client::builder();
++        let mut http_client_builder = reqwest::Client::builder();
++        // If the setting can't be read, use a dead proxy: fail closed rather than connect directly.
++        let proxy = HTTP_PROXY
++            .read()
++            .map(|p| p.clone())
++            .unwrap_or_else(|_| Some("socks5h://127.0.0.1:1".to_string()));
++        if let Some(proxy) = proxy {
++            // An explicit proxy also turns off reqwest's automatic system proxy detection.
++            http_client_builder =
++                http_client_builder.proxy(reqwest::Proxy::all(proxy).expect("validated in set_http_proxy"));
++        }
+         let http_client = http_client_builder
+             .http2_initial_stream_window_size(4 * 1024 * 1024)
+             .connect_timeout(HTTP_CONNECT_TIMEOUT)
