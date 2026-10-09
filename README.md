@@ -4,6 +4,12 @@ Small, private wallet for [Tari](https://tari.com) (XTM) on the Mac. It runs Tar
 
 Make a wallet or restore one from your 24 words, then send and receive XTM. Your keys stay on your Mac, locked with your password.
 
+<p align="center">
+  <img src="docs/wallet.png" width="260" alt="A wallet's XTM balance and history">
+  <img src="docs/receive.png" width="260" alt="Receiving XTM with a QR code">
+  <img src="docs/tari-testnet.png" width="260" alt="The TARI side in Clew Testnet">
+</p>
+
 - create or restore wallets from 24 recovery words, and keep as many as you want side by side
 - send and receive one-sided (stealth) payments, with a QR code for your address
 - wallet files are encrypted with your password, and Touch ID can be turned on as a shortcut
