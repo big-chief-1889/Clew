@@ -6,8 +6,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
-NETWORK="$(sed -n 's/.*static let network = "\(.*\)".*/\1/p' "$ROOT/Clew/App/Config.swift")"
-NODE="$(sed -n 's/.*static let defaultNodeURL = "\(.*\)".*/\1/p' "$ROOT/Clew/App/Config.swift")"
+NETWORK="$(sed -n 's/.*static let network = "\(.*\)".*/\1/p' "$ROOT/Config/Mainnet/Config.swift")"
+NODE="$(sed -n 's/.*static let defaultNodeURL = "\(.*\)".*/\1/p' "$ROOT/Config/Mainnet/Config.swift")"
 
 WORK="$(mktemp -d)"
 ARTI_PID=""

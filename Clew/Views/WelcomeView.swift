@@ -8,7 +8,7 @@ struct WelcomeView: View {
         VStack(spacing: 0) {
             Spacer()
             AppIconView(size: 112)
-            Text("Clew")
+            Text(NetworkSwitch.appName)
                 .font(.system(size: 34, weight: .bold, design: .rounded))
                 .padding(.top, 12)
             Text("A private wallet for Tari")
@@ -31,6 +31,8 @@ struct WelcomeView: View {
                     .buttonStyle(.wideSecondary)
             }
             .disabled(model.busy)
+            NetworkSwitchButton()
+                .padding(.top, 14)
         }
         .padding(.horizontal, 32)
         .padding(.vertical, 28)

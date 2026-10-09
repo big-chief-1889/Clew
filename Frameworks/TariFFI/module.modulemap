@@ -1,6 +1,0 @@
-module TariFFI {
-    header "wallet.h"
-    header "clew_ootle.h"
-    link "clew_core"
-    export *
-}

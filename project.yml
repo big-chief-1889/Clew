@@ -13,12 +13,15 @@ settings:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.7.0"
     CURRENT_PROJECT_VERSION: "1"
+    # Where scripts/build-ffi.sh puts the wallet libraries (release.sh points this elsewhere).
+    CLEW_FFI_ROOT: $(SRCROOT)/Frameworks
 targets:
   Clew:
     type: application
     platform: macOS
     sources:
       - path: Clew
+      - path: Config/Mainnet/Config.swift
     info:
       path: Clew/Info.plist
       properties:
@@ -45,12 +48,64 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_HARDENED_RUNTIME: YES
         DEAD_CODE_STRIPPING: YES
-        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Frameworks/TariFFI
-        LIBRARY_SEARCH_PATHS: $(SRCROOT)/Frameworks/TariFFI
+        SWIFT_INCLUDE_PATHS: $(CLEW_FFI_ROOT)/TariFFI
+        LIBRARY_SEARCH_PATHS: $(CLEW_FFI_ROOT)/TariFFI
         OTHER_LDFLAGS: [-lc++, -lresolv]
     postCompileScripts:
       - name: Embed Tor helper
         # Frameworks/Arti/arti is built and signed by scripts/build-arti.sh.
+        script: cp "${SRCROOT}/Frameworks/Arti/arti" "${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/arti"
+        inputFiles:
+          - $(SRCROOT)/Frameworks/Arti/arti
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/arti
+    dependencies:
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: LocalAuthentication.framework
+      - sdk: CoreImage.framework
+      # Clew Testnet travels inside Clew (Tari's library can't run both networks in one app).
+      - target: ClewTestnet
+        embed: true
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
+
+  # The same app built for Tari's testnet: its own wallets, settings and folder.
+  ClewTestnet:
+    type: application
+    platform: macOS
+    sources:
+      - path: Clew
+      - path: Config/Testnet/Config.swift
+    info:
+      path: Config/Testnet/Info.plist
+      properties:
+        CFBundleDisplayName: Clew Testnet
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.finance
+        NSHumanReadableCopyright: "Wallet engine © The Tari Project (BSD-3-Clause)"
+    entitlements:
+      path: Config/Testnet/ClewTestnet.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.clew.wallet.testnet
+        PRODUCT_NAME: Clew Testnet
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIconTestnet
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_HARDENED_RUNTIME: YES
+        DEAD_CODE_STRIPPING: YES
+        SWIFT_INCLUDE_PATHS: $(CLEW_FFI_ROOT)/TariFFI-testnet
+        LIBRARY_SEARCH_PATHS: $(CLEW_FFI_ROOT)/TariFFI-testnet
+        OTHER_LDFLAGS: [-lc++, -lresolv]
+    postCompileScripts:
+      - name: Embed Tor helper
         script: cp "${SRCROOT}/Frameworks/Arti/arti" "${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/arti"
         inputFiles:
           - $(SRCROOT)/Frameworks/Arti/arti

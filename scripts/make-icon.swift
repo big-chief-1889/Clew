@@ -1,8 +1,15 @@
-// Draws the Clew app icon (a ball of thread) and writes the macOS icon set.
+// Draws the Clew app icon (a ball of thread) and writes the macOS icon set. Clew Testnet's is
+// orange instead of pink, like its testnet badge.
 // Usage: swift scripts/make-icon.swift Clew/Assets.xcassets/AppIcon.appiconset
+//        swift scripts/make-icon.swift Clew/Assets.xcassets/AppIconTestnet.appiconset testnet
 import AppKit
 
 let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+let testnet = CommandLine.arguments.dropFirst(2).first == "testnet"
+// thread, ball highlight, ball shade, wraps, outline
+let palette: (UInt32, UInt32, UInt32, UInt32, UInt32) = testnet
+    ? (0xFFC069, 0xFFF1D6, 0xFFB547, 0xC9741A, 0x7A4310)
+    : (0xFF8DBE, 0xFFE6F0, 0xFF94C2, 0xD42F78, 0x7A1242)
 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 
 func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> CGColor {
@@ -37,7 +44,7 @@ func drawIcon(size: Int) -> Data {
     thread.addCurve(to: CGPoint(x: 790, y: 300), control1: CGPoint(x: 700, y: 300), control2: CGPoint(x: 740, y: 360))
     thread.addCurve(to: CGPoint(x: 760, y: 200), control1: CGPoint(x: 840, y: 240), control2: CGPoint(x: 800, y: 190))
     ctx.addPath(thread)
-    ctx.setStrokeColor(color(0xFF8DBE)); ctx.setLineWidth(22); ctx.setLineCap(.round)
+    ctx.setStrokeColor(color(palette.0)); ctx.setLineWidth(22); ctx.setLineCap(.round)
     ctx.strokePath()
 
     // The ball.
@@ -46,12 +53,12 @@ func drawIcon(size: Int) -> Data {
                                         width: radius * 2, height: radius * 2), transform: nil)
     ctx.saveGState()
     ctx.addPath(ball); ctx.clip()
-    let shade = CGGradient(colorsSpace: nil, colors: [color(0xFFE6F0), color(0xFF94C2)] as CFArray, locations: [0, 1])!
+    let shade = CGGradient(colorsSpace: nil, colors: [color(palette.1), color(palette.2)] as CFArray, locations: [0, 1])!
     ctx.drawRadialGradient(shade, startCenter: CGPoint(x: center.x - 80, y: center.y + 90), startRadius: 0,
                            endCenter: center, endRadius: radius, options: .drawsAfterEndLocation)
 
     // Wraps of thread around the ball.
-    ctx.setStrokeColor(color(0xD42F78, 0.85)); ctx.setLineWidth(16)
+    ctx.setStrokeColor(color(palette.3, 0.85)); ctx.setLineWidth(16)
     for (angle, width, offset) in [(-0.55, 1.15, -40.0), (0.35, 1.0, 30.0), (1.2, 1.25, 0.0), (-1.3, 0.75, 60.0)] {
         ctx.saveGState()
         ctx.translateBy(x: center.x, y: center.y)
@@ -61,7 +68,7 @@ func drawIcon(size: Int) -> Data {
         ctx.restoreGState()
     }
     ctx.restoreGState()
-    ctx.addPath(ball); ctx.setStrokeColor(color(0x7A1242, 0.4)); ctx.setLineWidth(6); ctx.strokePath()
+    ctx.addPath(ball); ctx.setStrokeColor(color(palette.4, 0.4)); ctx.setLineWidth(6); ctx.strokePath()
 
     let rep = NSBitmapImageRep(cgImage: ctx.makeImage()!)
     return rep.representation(using: .png, properties: [:])!

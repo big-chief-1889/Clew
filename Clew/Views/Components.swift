@@ -50,6 +50,18 @@ struct IconButton: View {
     }
 }
 
+/// Opens the other of Clew and Clew Testnet (and quits this one).
+struct NetworkSwitchButton: View {
+    var body: some View {
+        Button { NetworkSwitch.switchApps() } label: {
+            Label(NetworkSwitch.title, systemImage: "arrow.left.arrow.right")
+                .font(.callout)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+    }
+}
+
 struct TestnetBadge: View {
     var body: some View {
         Text("TESTNET — coins have no value")

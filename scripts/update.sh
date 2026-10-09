@@ -25,8 +25,6 @@ ASSUME_YES=false
 
 current_tari="$(sed -n 's/^TARI_TAG="\(.*\)"/\1/p' scripts/build-ffi.sh)"
 current_arti="$(sed -n 's/^ARTI_VERSION="\(.*\)"/\1/p' scripts/build-arti.sh)"
-network="$(sed -n 's/.*static let network = "\(.*\)".*/\1/p' Clew/App/Config.swift)"
-[ "$network" = mainnet ] && build_network=mainnet || build_network=esme
 
 # "a < b" for versions like v6.1.0 / 2.6.0
 newer() { python3 -c '
@@ -70,19 +68,18 @@ fi
 
 # --- Safety net: back up everything this script changes ---------------------------------
 rm -rf "$BACKUP" && mkdir -p "$BACKUP"
-cp -R Frameworks/TariFFI Frameworks/Arti patches "$BACKUP/"
-cp scripts/build-ffi.sh scripts/build-arti.sh Clew/App/Config.swift project.yml rust/clew-core/Cargo.lock "$BACKUP/"
+cp -R Frameworks/TariFFI Frameworks/TariFFI-testnet Frameworks/Arti patches Config "$BACKUP/"
+cp scripts/build-ffi.sh scripts/build-arti.sh project.yml rust/clew-core/Cargo.lock "$BACKUP/"
 tari_moved=false
 
 rollback() {
   trap - ERR INT
   echo
   echo "Update failed — putting everything back. Your installed Clew hasn't been touched."
-  rm -rf Frameworks/TariFFI Frameworks/Arti patches
-  cp -R "$BACKUP/TariFFI" "$BACKUP/Arti" Frameworks/
-  cp -R "$BACKUP/patches" .
+  rm -rf Frameworks/TariFFI Frameworks/TariFFI-testnet Frameworks/Arti patches Config
+  cp -R "$BACKUP/TariFFI" "$BACKUP/TariFFI-testnet" "$BACKUP/Arti" Frameworks/
+  cp -R "$BACKUP/patches" "$BACKUP/Config" .
   cp "$BACKUP/build-ffi.sh" "$BACKUP/build-arti.sh" scripts/
-  cp "$BACKUP/Config.swift" Clew/App/
   cp "$BACKUP/project.yml" .
   cp "$BACKUP/Cargo.lock" rust/clew-core/
   if $tari_moved; then
@@ -120,8 +117,8 @@ if $update_tari; then
   git -C "$TARI" apply -N "patches/tari-$latest_tari-clew.patch"
   cargo update --manifest-path "$TARI/Cargo.toml" --workspace --offline --quiet
   cargo metadata --manifest-path rust/clew-core/Cargo.toml --format-version 1 > /dev/null
-  echo "Building Tari's wallet library (this takes a few minutes)…"
-  scripts/build-ffi.sh "$build_network" > build/update-ffi.log 2>&1 \
+  echo "Building Tari's wallet libraries, mainnet and testnet (this takes a while)…"
+  scripts/build-ffi.sh > build/update-ffi.log 2>&1 \
     || { tail -20 build/update-ffi.log; false; }
 
   # Point out interface changes, so a human can check Clew still uses the library correctly.

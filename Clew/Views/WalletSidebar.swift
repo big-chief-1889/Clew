@@ -68,6 +68,7 @@ struct WalletSidebar: View {
             VStack(alignment: .leading, spacing: 2) {
                 action("New wallet", icon: "plus") { add(.create) }
                 action("Restore wallet", icon: "arrow.counterclockwise") { add(.restore) }
+                action(NetworkSwitch.title, icon: "arrow.left.arrow.right") { NetworkSwitch.switchApps() }
             }
             .padding(10)
         }

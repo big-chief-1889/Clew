@@ -16,7 +16,7 @@ Make a wallet or restore one from your 24 words, then send and receive XTM. Your
 Runs on:
 
 - Mac: Apple Silicon, macOS 14 or later (SwiftUI)
-- Tari mainnet. A testnet build is a couple of commands away, see below
+- Tari mainnet, plus Clew Testnet for Tari's testnet (inside Clew, see below)
 
 > **Heads up:** Clew hasn't been audited. Start with small amounts and keep your 24 words on paper.
 
@@ -40,20 +40,20 @@ You need Xcode, Rust (`rustup`), and `protobuf` and `xcodegen` from Homebrew.
 brew install protobuf xcodegen
 git clone --depth 1 --branch v6.1.0 https://github.com/tari-project/tari.git vendor/tari
 git clone --depth 1 --branch v0.45.0 https://github.com/tari-project/tari-ootle.git vendor/tari-ootle
-scripts/build-ffi.sh mainnet
+scripts/build-ffi.sh
 scripts/build-arti.sh
 scripts/release.sh
 ```
 
 Builds `build/release/Clew-<version>-mac.zip`, the same thing that goes in a release. No Apple developer account needed.
 
-- `build-ffi.sh` applies Clew's patches to Tari and Ootle and builds `rust/clew-core` into `Frameworks/TariFFI`. That's Tari's wallet library (`minotari_wallet_ffi`) plus a wallet for Ootle, Tari's layer 2, which the app doesn't use yet. It also writes `Clew/App/Config.swift` for the network you picked
+- `build-ffi.sh` applies Clew's patches to Tari and Ootle and builds `rust/clew-core`, Tari's wallet library (`minotari_wallet_ffi`) plus a wallet for Ootle, Tari's layer 2. Tari builds its library for one network family, so it builds two: mainnet into `Frameworks/TariFFI` and testnet into `Frameworks/TariFFI-testnet`, each with its settings in `Config/`
 - `build-arti.sh` builds Arti 2.6.0 from crates.io with `--locked`
 - `release.sh` rebuilds both with your home folder remapped out of the file paths, builds Clew, signs it ad-hoc, and scans every file in the app for your username and home folder before zipping it. Add more things to look for with `CLEW_RELEASE_FORBIDDEN="Your Name|you@example.com" scripts/release.sh`
 
 If you have an Apple Development certificate, `scripts/install.sh` builds a copy signed with it and puts it straight in /Applications. Your team ID isn't stored in the repo, `scripts/generate-project.sh` reads it from your certificate. Wallets made with Clew 0.6 or earlier need this signed copy once, to switch from the Keychain to a password.
 
-For testnet (Esmeralda) run `scripts/build-ffi.sh esme` and then `scripts/install.sh`. Each network keeps its own wallets and settings, so they never mix.
+Clew Testnet is the same app built for Tari's testnet (Esmeralda) and Ootle's testnet, with an orange icon. It ships inside Clew (`Contents/Helpers`), and "Switch to testnet wallets" in the wallet list, on the lock screen or on the welcome screen opens it and quits Clew ("Switch to mainnet wallets" goes back). It's a separate app to macOS, so it has its own wallets, settings and password, and testnet coins never mix with real ones.
 
 If you change Tari's or Ootle's source, regenerate the patch:
 
@@ -75,7 +75,7 @@ Checks for a newer stable Tari release and an Arti release that's at least two w
 - The patch adds `wallet_set_http_proxy` and `wallet_change_passphrase` to Tari's FFI, and stops the wallet falling back to Tari's own server when your node doesn't answer.
 - Tari's wallet makes a new HTTP client for every request, so the proxy setting applies right away. Each wallet uses its own SOCKS username, so Tor gives it separate circuits.
 - The node still sees the transactions you send, just not your IP. Running your own node fixes that. Set its address in wallet settings (https, or http for localhost and .onion).
-- Wallets live in `~/Library/Containers/app.clew.wallet/Data/Library/Application Support/Clew/<network>/`, one folder per wallet, listed in `wallets.json`.
+- Wallets live in `~/Library/Containers/app.clew.wallet/Data/Library/Application Support/Clew/<network>/` (Clew Testnet's in `app.clew.wallet.testnet`), one folder per wallet, listed in `wallets.json`.
 - Your password encrypts the keys and seed inside each wallet database (Tari uses Argon2id for this). The transaction history isn't encrypted, so the app sandbox and FileVault are what protect it. There's no minimum length, so how strong it is is up to you.
 - One unlock opens all your wallets until Clew locks (sleep, screen lock, or the lock button). Sending, showing recovery words and deleting a wallet ask for the password again.
 - The Touch ID shortcut encrypts your password to a key in the Mac's Secure Enclave, so it only works on that Mac, and only with a fingerprint (not the Mac's login password). It doesn't need the Keychain or a developer certificate.

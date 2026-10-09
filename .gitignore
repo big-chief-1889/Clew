@@ -11,11 +11,8 @@ vendor/
 
 # Built binaries: rebuilt from source by scripts/build-ffi.sh and scripts/build-arti.sh.
 # They embed local paths and the signing certificate.
-Frameworks/TariFFI/libclew_core.a
-Frameworks/TariFFI/libminotari_wallet_ffi.a
-Frameworks/TariFFI/wallet.h
-Frameworks/TariFFI/clew_ootle.h
-Frameworks/TariFFI/BUILD_INFO
+Frameworks/TariFFI/
+Frameworks/TariFFI-testnet/
 Frameworks/Arti/
 
 .DS_Store

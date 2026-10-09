@@ -103,7 +103,8 @@ final class AppModel {
         hideBalance = UserDefaults.standard.bool(forKey: "hideBalance")
         useTor = UserDefaults.standard.object(forKey: "useTor") as? Bool ?? true  // Tor unless switched off
         nodeURL = UserDefaults.standard.string(forKey: "nodeURL.\(Config.network)") ?? Config.defaultNodeURL
-        showOotle = UserDefaults.standard.bool(forKey: "showOotleTestnet")
+        // Clew Testnet is for trying things out, so its TARI side starts on.
+        showOotle = UserDefaults.standard.object(forKey: "showOotleTestnet") as? Bool ?? Config.isTestnet
         do {
             let loaded = try WalletStore.load()
             store = loaded

@@ -61,6 +61,7 @@ struct LockedView: View {
                 }
             if model.needsPasswordSwitch { switchToPassword } else { unlock }
             Spacer()
+            NetworkSwitchButton()
         }
         .padding(.horizontal, 40)
         .overlay { if model.busy { ProgressView().offset(y: 160) } }
@@ -69,7 +70,7 @@ struct LockedView: View {
 
     private var unlock: some View {
         VStack(spacing: 0) {
-            Text("Clew is locked")
+            Text("\(NetworkSwitch.appName) is locked")
                 .font(.title2.weight(.semibold))
                 .padding(.top, 20)
             Text(model.wallets.count == 1 ? "1 wallet" : "\(model.wallets.count) wallets")
