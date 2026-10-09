@@ -88,6 +88,8 @@ echo "  clean"
 # Zip timestamps have no time zone, so write them in UTC rather than local time.
 ZIP="Clew-$VERSION-mac.zip"
 (cd "$OUT" && TZ=UTC ditto -c -k --norsrc --noextattr --noqtn --keepParent Clew.app "$ZIP" && shasum -a 256 "$ZIP" > SHA256SUMS.txt)
-rm -rf "$STAGE"
+# The zip has the app; copies left in build/ (same app ID as an installed Clew) can hide it from the
+# Dock's Apps view and Launchpad.
+rm -rf "$STAGE" "$APP" "$ROOT"/build/release-derived/Build/Products/Release/*.app
 scripts/unregister-build-copies.sh
 echo "Done: build/release/$ZIP ($(du -h "$OUT/$ZIP" | cut -f1)) and build/release/SHA256SUMS.txt"

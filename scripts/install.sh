@@ -29,7 +29,8 @@ sleep 1
 
 rm -rf /Applications/Clew.app
 ditto "$APP" /Applications/Clew.app
-# Xcode registers the copies it builds with macOS; leaving them makes duplicates of Clew that can
-# hide it from the Dock's Apps view.
+# Copies of Clew left in build/ (same app ID) can hide the installed one from the Dock's Apps view
+# and Launchpad, so they're removed and forgotten once installed.
+rm -rf build/DerivedData/Build/Products/Release/*.app
 scripts/unregister-build-copies.sh
 echo "Installed /Applications/Clew.app ($(du -sh /Applications/Clew.app | cut -f1))"
