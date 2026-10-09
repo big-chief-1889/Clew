@@ -36,6 +36,23 @@ struct OotleEntry: Identifiable, Equatable, Decodable {
     var amount: MicroTari { change.magnitude }
 }
 
+/// XTM moved (burnt) from the main wallet to this TARI account, and how far it has got.
+struct OotleMove: Equatable, Decodable {
+    enum Status: String, Decodable {
+        /// Being confirmed on Tari's main chain.
+        case confirming
+        /// Confirmed; waiting until Ootle accepts the claim (about a day after the move).
+        case waiting
+        case claimed
+    }
+    /// µT of XTM.
+    let amount: MicroTari
+    let time: Int64
+    let status: Status
+
+    var date: Date { Date(timeIntervalSince1970: TimeInterval(time)) }
+}
+
 /// Owns one running Ootle (Tari layer 2) wallet. Its keys come from the main wallet's seed: the
 /// real ones on Ootle's mainnet, separate test keys on its testnet (see clew-core). Every call
 /// blocks, most of them on the network, so call it off the main thread.
@@ -130,6 +147,48 @@ final class OotleCore {
     /// The exact fee for sending `amount` to `address`, from trial runs on the network.
     func estimateSendFee(to address: String, amount: MicroTari) throws -> MicroTari {
         try using { handle in try ootle { clew_ootle_estimate_send_fee(handle, address, amount, $0) } }
+    }
+
+    /// Burns `amount` of XTM from the main wallet `l1` to this account, at `feePerGram`. One way:
+    /// the XTM can't come back. Refused when the two wallets are on different networks.
+    func moveFromMainWallet(_ l1: WalletCore, amount: MicroTari, feePerGram: MicroTari) throws {
+        guard feePerGram <= FeeTiers.maximumRate else { throw OotleError(message: "That fee rate is too high.") }
+        _ = try using { handle in
+            try l1.using { l1Handle in
+                try ootle { clew_ootle_burn_from_l1(handle, l1Handle, amount, feePerGram, $0) }
+            }
+        }
+    }
+
+    /// Moves from `l1` to this account, newest first. Reads local data only.
+    func moves(from l1: WalletCore) throws -> [OotleMove] {
+        try using { handle in
+            try l1.using { l1Handle in
+                let pointer = try ootle { clew_ootle_burns(handle, l1Handle, $0) }
+                defer { clew_string_destroy(pointer) }
+                guard let pointer else { return [] }
+                return try JSONDecoder().decode([OotleMove].self, from: Data(String(cString: pointer).utf8))
+            }
+        }
+    }
+
+    /// Claims every move Ootle accepts now. Returns how many were claimed, and why one couldn't be
+    /// (the others are still tried).
+    func claimMoves(from l1: WalletCore) throws -> (claimed: Int, problem: String?) {
+        try using { handle in
+            try l1.using { l1Handle in
+                var code: Int32 = 0
+                let claimed = clew_ootle_claim_burns(handle, l1Handle, nil, &code)
+                var problem: String?
+                if code != 0 {
+                    let pointer = clew_last_error()
+                    defer { clew_string_destroy(pointer) }
+                    problem = pointer.map { String(cString: $0) } ?? "Ootle error \(code)"
+                }
+                if claimed < 0 { throw OotleError(message: problem ?? "Couldn't claim.") }
+                return (Int(claimed), problem)
+            }
+        }
     }
 
     /// Sends privately, paying at most `maxFee`. Returns once the network has confirmed it.

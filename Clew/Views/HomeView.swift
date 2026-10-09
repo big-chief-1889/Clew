@@ -17,7 +17,7 @@ struct HomeView: View {
     private var showingTari: Bool { asset == .tari && model.showOotle }
 
     enum Sheet: Identifiable {
-        case send, receive, settings, add(AddWalletSheet.Mode), detail(WalletTransaction), tariSend, tariReceive
+        case send, receive, settings, add(AddWalletSheet.Mode), detail(WalletTransaction), tariSend, tariReceive, moveToTari
         var id: String {
             if case .detail(let tx) = self { return "detail-\(tx.id)" }
             return String(describing: self)
@@ -81,6 +81,7 @@ struct HomeView: View {
                 case .detail(let tx): TransactionDetailView(tx: tx)
                 case .tariSend: TariSendView()
                 case .tariReceive: TariReceiveView()
+                case .moveToTari: MoveToTariView()
                 }
             }
             .presentationBackground(Theme.background)

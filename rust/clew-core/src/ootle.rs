@@ -3,7 +3,11 @@
 //! 24-word seed as the L1 wallet (same derivation as Ootle's own wallet), and its database is
 //! encrypted with the Clew password.
 
-use std::{path::Path, str::FromStr, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::Duration,
+};
 
 use anyhow::Context;
 use ootle_byte_type::ToByteType;
@@ -96,6 +100,8 @@ pub struct OotleWallet {
     account: ComponentAddress,
     address: String,
     network: Network,
+    /// The wallet's folder.
+    directory: PathBuf,
 }
 
 impl OotleWallet {
@@ -184,6 +190,7 @@ impl OotleWallet {
             account_monitor,
             scanner,
             network,
+            directory: directory.to_path_buf(),
         })
     }
 

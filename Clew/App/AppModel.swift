@@ -53,6 +53,13 @@ final class AppModel {
     private(set) var ootleOnline: Bool?
     /// A TARI action (claim, send) is in progress.
     private(set) var ootleBusy = false
+    /// XTM moved to TARI that hasn't been claimed yet, newest first.
+    private(set) var tariMoves: [OotleMove] = []
+    /// Why the last attempt to claim a move didn't work, if it didn't.
+    private(set) var tariMoveProblem: String?
+    /// Moving XTM to TARI needs both on the same network. Until Ootle launches, Clew's mainnet
+    /// wallets and Ootle's testnet don't match, so it's off (moving real XTM there would lose it).
+    var canMoveToTari: Bool { Config.network == Config.ootleNetwork }
 
     var activeWallet: WalletProfile? { wallets.first { $0.id == activeID } }
 
@@ -809,6 +816,8 @@ final class AppModel {
         ootleState = .off
         tariBalance = 0
         tariHistory = []
+        tariMoves = []
+        tariMoveProblem = nil
         ootleAddress = ""
         ootleOnline = nil
     }
@@ -839,20 +848,41 @@ final class AppModel {
         }
     }
 
-    /// Scans for payments, then reads the balance and history. Offline, it still shows what's known.
+    /// Scans for payments and claims moves from XTM that are ready, then reads the balance,
+    /// history and moves. Offline, it still shows what's known.
     func refreshOotle() async {
         guard let core = ootle else { return }
+        let l1 = wallet
         let generation = ootleGeneration
-        let (online, result) = await Task.detached { () -> (Bool, Result<(MicroTari, [OotleEntry]), Error>) in
-            let online = (try? core.refresh()) != nil
-            return (online, Result { (try core.balance, try core.history()) })
+        let update = await Task.detached { () -> OotleUpdate in
+            var update = OotleUpdate()
+            update.online = (try? core.refresh()) != nil
+            if let l1, update.online, let moves = try? core.moves(from: l1), moves.contains(where: { $0.status == .waiting }) {
+                do {
+                    update.claimProblem = try core.claimMoves(from: l1).problem
+                } catch {
+                    update.claimProblem = error.localizedDescription
+                }
+            }
+            update.balance = try? core.balance
+            update.history = try? core.history()
+            update.moves = l1.flatMap { try? core.moves(from: $0) }
+            return update
         }.value
         guard generation == ootleGeneration else { return }
-        ootleOnline = online
-        if case .success(let (balance, history)) = result {
-            tariBalance = balance
-            tariHistory = history
-        }
+        ootleOnline = update.online
+        if let balance = update.balance { tariBalance = balance }
+        if let history = update.history { tariHistory = history }
+        if let moves = update.moves { tariMoves = moves.filter { $0.status != .claimed } }
+        tariMoveProblem = update.claimProblem
+    }
+
+    private struct OotleUpdate {
+        var online = false
+        var balance: MicroTari?
+        var history: [OotleEntry]?
+        var moves: [OotleMove]?
+        var claimProblem: String?
     }
 
     /// Runs a TARI action on the open Ootle wallet off the main thread, one at a time.
@@ -885,6 +915,20 @@ final class AppModel {
         try await authorize(password: password, reason: "send \(XTM.format(amount)) tTARI")
         guard walletID == ootleWalletID else { throw OotleError.closed }
         _ = try await withOotle { try $0.send(to: address, amount: amount, maxFee: maxFee) }
+    }
+
+    /// Moves `amount` of XTM from the open wallet to its TARI side (burnt on the main chain, claimed
+    /// on Ootle automatically about a day later), after checking the password (or Touch ID). Throws
+    /// `PasswordNeeded` when the password has to be typed.
+    func moveToTari(amount: MicroTari, feePerGram: MicroTari, from walletID: UUID?, password: String?) async throws {
+        guard canMoveToTari else { throw OotleError(message: "Moving XTM to TARI opens when Ootle launches.") }
+        guard let l1 = wallet, ootle != nil, walletID == activeID, walletID == ootleWalletID else {
+            throw OotleError.closed
+        }
+        try await authorize(password: password, reason: "move \(XTM.format(amount)) XTM to TARI")
+        guard l1 === wallet, walletID == ootleWalletID else { throw OotleError.closed }
+        _ = try await withOotle { try $0.moveFromMainWallet(l1, amount: amount, feePerGram: feePerGram) }
+        refresh()
     }
 
     /// The Ootle wallet's id, for screens that act on the wallet they were opened for.

@@ -29,7 +29,10 @@ uint64_t clew_ootle_send(OotleWallet *wallet, const char *address, uint64_t amou
 uint64_t clew_ootle_burn_from_l1(OotleWallet *wallet, struct TariWallet *l1_wallet, uint64_t amount,
                                  uint64_t fee_per_gram, int *error_out);
 // Claims confirmed burns Ootle accepts now; returns how many, or -1. waiting_out may be NULL.
+// error_out can be set alongside a count: one burn failed, the others were still tried.
 int64_t clew_ootle_claim_burns(OotleWallet *wallet, struct TariWallet *l1_wallet, uint32_t *waiting_out,
                                int *error_out);
 // TARI history as JSON, newest first; free with clew_string_destroy.
 char *clew_ootle_history(OotleWallet *wallet, uint32_t offset, uint32_t limit, int *error_out);
+// This account's burns and their progress as JSON ([{"amount","time","status"}]); local data only.
+char *clew_ootle_burns(OotleWallet *wallet, struct TariWallet *l1_wallet, int *error_out);

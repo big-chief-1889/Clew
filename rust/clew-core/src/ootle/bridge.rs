@@ -10,7 +10,11 @@ use anyhow::Context;
 use minotari_wallet::{WalletSqlite, output_manager_service::UtxoSelectionCriteria};
 use ootle_byte_type::{FromByteType, ToByteType};
 use tari_common_types::types::CompressedPublicKey;
-use tari_crypto::{keys::PublicKey as _, ristretto::RistrettoPublicKey, tari_utilities::ByteArray};
+use tari_crypto::{
+    keys::PublicKey as _,
+    ristretto::RistrettoPublicKey,
+    tari_utilities::{ByteArray, hex::Hex},
+};
 use tari_engine_types::{
     commit_result::{ExecutionFailureCode, RejectReason},
     confidential::{ClaimBurnOutputData, MinotariBurnClaimProof},
@@ -45,7 +49,24 @@ pub struct ClaimSummary {
     pub claimed: u32,
     /// Burns not claimable yet: still being confirmed on L1, or not yet synced into Ootle.
     pub waiting: u32,
+    /// Why a burn couldn't be claimed, if one couldn't. The others are still tried.
+    pub problem: Option<String>,
 }
+
+/// A burn to this account, for the app's "moving to TARI" list.
+#[derive(serde::Serialize)]
+struct BurnEntry {
+    /// µT of XTM burnt.
+    amount: u64,
+    /// Unix seconds.
+    time: i64,
+    /// "confirming" (on L1), "waiting" (for Ootle to accept the claim) or "claimed".
+    status: &'static str,
+}
+
+/// File in the Ootle wallet's folder listing the commitments of burns already claimed, so they
+/// aren't checked with the network again.
+const CLAIMED_FILE: &str = "claimed-burns.json";
 
 impl OotleWallet {
     /// Burns `amount` µT of XTM from `l1` to this wallet's Ootle account. Burnt XTM can't be
@@ -86,9 +107,11 @@ impl OotleWallet {
         let owner_key = account.account.owner_public_key;
         let consensus = ConsensusManager::builder(l1.network.as_network()).build();
         let mut summary = ClaimSummary::default();
+        let mut claimed = self.claimed_burns();
 
         for burn in l1.db.get_all_burn_proofs()? {
-            if burn.burn_proof.claim_public_key.as_bytes() != owner_key.as_bytes() {
+            let commitment = burn.burn_proof.commitment.to_hex();
+            if burn.burn_proof.claim_public_key.as_bytes() != owner_key.as_bytes() || claimed.contains(&commitment) {
                 continue;
             }
             let (Some(output_proof), Some(encrypted_data), Some(value)) =
@@ -99,31 +122,83 @@ impl OotleWallet {
             };
             let height = output_proof.block_height;
             let mined_in_epoch = consensus.consensus_constants(height).block_height_to_epoch(height).as_u64();
-            let claim = claim_proof_from_l1(&BurnClaimProof {
-                burn_public_key: burn.burn_proof.claim_public_key,
-                ownership_proof: burn.burn_proof.ownership_proof,
-                output_proof,
-                value: value.as_u64(),
-            })
-            .map_err(anyhow::Error::msg)?;
-            let encrypted_data = EncryptedData::try_from(encrypted_data.into_vec())
-                .map_err(|len| anyhow::anyhow!("burn encrypted data has the wrong length ({len})"))?;
-
-            if self.is_claimed(&claim)? {
-                continue;
-            }
-            let current_epoch = self.runtime.block_on(self.current_epoch())?;
-            if current_epoch <= mined_in_epoch {
-                summary.waiting += 1;
-                continue;
-            }
-            if self.claim_burn(claim, encrypted_data)? {
-                summary.claimed += 1;
-            } else {
-                summary.waiting += 1;
+            let attempt = (|| -> anyhow::Result<Option<bool>> {
+                let claim = claim_proof_from_l1(&BurnClaimProof {
+                    burn_public_key: burn.burn_proof.claim_public_key,
+                    ownership_proof: burn.burn_proof.ownership_proof,
+                    output_proof,
+                    value: value.as_u64(),
+                })
+                .map_err(anyhow::Error::msg)?;
+                let encrypted_data = EncryptedData::try_from(encrypted_data.into_vec())
+                    .map_err(|len| anyhow::anyhow!("burn encrypted data has the wrong length ({len})"))?;
+                if self.is_claimed(&claim)? {
+                    return Ok(None);
+                }
+                if self.runtime.block_on(self.current_epoch())? <= mined_in_epoch {
+                    return Ok(Some(false));
+                }
+                Ok(Some(self.claim_burn(claim, encrypted_data)?))
+            })();
+            match attempt {
+                Ok(None) => {
+                    claimed.insert(commitment);
+                },
+                Ok(Some(true)) => {
+                    claimed.insert(commitment);
+                    summary.claimed += 1;
+                },
+                Ok(Some(false)) => summary.waiting += 1,
+                Err(e) => {
+                    summary.waiting += 1;
+                    summary.problem.get_or_insert(format!("{e:#}"));
+                },
             }
         }
+        self.save_claimed_burns(&claimed)?;
         Ok(summary)
+    }
+
+    /// The burns to this account from `l1` and how far each has got, newest first, as JSON. Reads
+    /// local data only.
+    pub fn burns_json(&self, l1: &WalletSqlite) -> anyhow::Result<String> {
+        let account = self.sdk.accounts_api().get_account_by_address(&self.account)?;
+        let owner_key = account.account.owner_public_key;
+        let claimed = self.claimed_burns();
+        let mut entries = l1
+            .db
+            .get_all_burn_proofs()?
+            .into_iter()
+            .filter(|b| b.burn_proof.claim_public_key.as_bytes() == owner_key.as_bytes())
+            .map(|b| BurnEntry {
+                amount: b.value.map(|v| v.as_u64()).unwrap_or(0),
+                time: b.created_at.and_utc().timestamp(),
+                status: if claimed.contains(&b.burn_proof.commitment.to_hex()) {
+                    "claimed"
+                } else if b.burn_output_proof.is_some() {
+                    "waiting"
+                } else {
+                    "confirming"
+                },
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|e| std::cmp::Reverse(e.time));
+        Ok(serde_json::to_string(&entries)?)
+    }
+
+    fn claimed_burns(&self) -> std::collections::BTreeSet<String> {
+        std::fs::read(self.directory.join(CLAIMED_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_claimed_burns(&self, claimed: &std::collections::BTreeSet<String>) -> anyhow::Result<()> {
+        let path = self.directory.join(CLAIMED_FILE);
+        let temporary = path.with_extension("json.new");
+        std::fs::write(&temporary, serde_json::to_vec(claimed)?)?;
+        std::fs::rename(&temporary, &path)?;
+        Ok(())
     }
 
     /// Whether Ootle already has the tombstone a claim of this burn leaves.

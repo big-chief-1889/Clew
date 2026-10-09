@@ -302,7 +302,8 @@ pub unsafe extern "C" fn clew_ootle_burn_from_l1(
 
 /// Claims every confirmed burn from `l1_wallet` to this account that Ootle accepts now. Sets
 /// `waiting_out` (may be null) to how many aren't claimable yet. Returns how many were claimed, or
-/// -1 on failure (see `error_out`).
+/// -1 on failure. If one burn couldn't be claimed, `error_out` says why even though the others were
+/// tried (and the count is still returned).
 ///
 /// # Safety
 /// `wallet` must be a live Ootle wallet and `l1_wallet` a live TariWallet.
@@ -322,6 +323,10 @@ pub unsafe extern "C" fn clew_ootle_claim_burns(
         Ok(summary) => {
             if let Some(waiting) = unsafe { waiting_out.as_mut() } {
                 *waiting = summary.waiting;
+            }
+            // Claims that went through still count; a problem with another burn is reported too.
+            if let Some(problem) = summary.problem {
+                unsafe { report(error_out, ERR_FAILED, problem) };
             }
             i64::from(summary.claimed)
         },
@@ -350,6 +355,32 @@ pub unsafe extern "C" fn clew_ootle_history(
         return ptr::null_mut();
     };
     match w.history_json(offset as usize, limit as usize) {
+        Ok(json) => owned(&json),
+        Err(e) => {
+            unsafe { report(error_out, ERR_FAILED, format!("{e:#}")) };
+            ptr::null_mut()
+        },
+    }
+}
+
+/// This account's burns from `l1_wallet` and how far each has got, newest first, as JSON
+/// (`[{"amount","time","status"}]`, status "confirming", "waiting" or "claimed"). Local data only.
+/// Free with `clew_string_destroy`; null on failure.
+///
+/// # Safety
+/// `wallet` must be a live Ootle wallet and `l1_wallet` a live TariWallet.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clew_ootle_burns(
+    wallet: *mut OotleWallet,
+    l1_wallet: *mut TariWallet,
+    error_out: *mut c_int,
+) -> *mut c_char {
+    unsafe { clear(error_out) };
+    let (Some(w), Some(l1)) = (unsafe { wallet.as_ref() }, unsafe { l1_wallet.as_ref() }) else {
+        unsafe { report(error_out, ERR_ARGUMENT, "missing wallet") };
+        return ptr::null_mut();
+    };
+    match w.burns_json(&l1.wallet) {
         Ok(json) => owned(&json),
         Err(e) => {
             unsafe { report(error_out, ERR_FAILED, format!("{e:#}")) };

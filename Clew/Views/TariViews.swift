@@ -35,6 +35,9 @@ struct TariSide: View {
                     .buttonStyle(.wideSecondary)
                     .disabled(!ready || model.ootleAddress.isEmpty)
             }
+            Button { open(.moveToTari) } label: { Label("Move XTM to TARI", systemImage: "arrow.right.circle") }
+                .buttonStyle(.wideSecondary)
+                .disabled(!ready)
             // Only offered to a wallet that has never had TARI: the faucet gives each account one claim.
             if ready && model.tariHistory.isEmpty && model.tariBalance == 0 {
                 Button { Task { await claim() } } label: {
@@ -60,7 +63,7 @@ struct TariSide: View {
     }
 
     @ViewBuilder private var history: some View {
-        if model.tariHistory.isEmpty {
+        if model.tariHistory.isEmpty && model.tariMoves.isEmpty {
             VStack(spacing: 12) {
                 YarnBallView()
                     .frame(width: 84, height: 84)
@@ -76,6 +79,21 @@ struct TariSide: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List {
+                if !model.tariMoves.isEmpty {
+                    Section {
+                        ForEach(Array(model.tariMoves.enumerated()), id: \.offset) { MoveRow(move: $0.element) }
+                        if let problem = model.tariMoveProblem {
+                            Label(problem, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .listRowSeparator(.hidden)
+                        }
+                    } header: {
+                        Text("Moving to TARI")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 ForEach(groupedByDay, id: \.day) { group in
                     Section {
                         ForEach(group.items) { TariRow(entry: $0) }
@@ -101,6 +119,38 @@ struct TariSide: View {
         if Calendar.current.isDateInToday(day) { return "Today" }
         if Calendar.current.isDateInYesterday(day) { return "Yesterday" }
         return day.formatted(date: .abbreviated, time: .omitted)
+    }
+}
+
+/// XTM on its way to the TARI side.
+private struct MoveRow: View {
+    @Environment(AppModel.self) private var model
+    let move: OotleMove
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.right")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.orange)
+                .frame(width: 34, height: 34)
+                .background(.orange.opacity(0.14), in: Circle())
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(model.hideBalance ? "•••" : XTM.format(move.amount)) XTM → TARI").font(.body.weight(.medium))
+                Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer()
+            ProgressView().controlSize(.small)
+        }
+        .padding(.vertical, 4)
+        .listRowSeparator(.hidden)
+    }
+
+    private var status: String {
+        let started = move.date.formatted(date: .abbreviated, time: .shortened)
+        switch move.status {
+        case .confirming: return "Confirming on Tari's main chain · started \(started)"
+        case .waiting, .claimed: return "Claimed automatically about a day after \(started)"
+        }
     }
 }
 
@@ -419,5 +469,137 @@ struct TariSendView: View {
 
     private func row(_ label: String, _ value: String) -> some View {
         HStack { Text(label); Spacer(); Text("\(value) tTARI").monospacedDigit() }
+    }
+}
+
+/// Moves XTM from the main chain to this wallet's TARI side: the XTM is burnt, and Clew claims the
+/// same amount (less a small Ootle fee) as TARI about a day later. One way only.
+struct MoveToTariView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @State private var amountText = ""
+    @State private var tiers = FeeTiers.fallback
+    @State private var understandsOneWay = false
+    @State private var understandsWait = false
+    @State private var moving = false
+    @State private var error: String?
+    @State private var askingPassword = false
+    /// The wallet this screen moves from, fixed when it opens.
+    @State private var walletID: UUID?
+
+    private var amount: MicroTari? { XTM.parse(amountText) }
+    private var feePerGram: MicroTari { tiers.normal }
+    private var fee: MicroTari? { amount.flatMap { model.estimateFee(amount: $0, feePerGram: feePerGram) } }
+    private var total: MicroTari? {
+        guard let amount, let fee else { return nil }
+        let (sum, overflow) = amount.addingReportingOverflow(fee)
+        return overflow ? nil : sum
+    }
+    private var canMove: Bool {
+        model.canMoveToTari && understandsOneWay && understandsWait && !moving
+            && total.map { $0 <= model.balance.available } == true
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Move XTM to TARI").font(.title2.weight(.semibold))
+
+            if !model.canMoveToTari {
+                Label {
+                    Text("Available when Ootle launches. Ootle is still on its testnet, while your wallets are on Tari's main network: XTM moved there now would be lost, so Clew won't do it.")
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "clock")
+                }
+                .font(.callout)
+                .padding(10)
+                .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            Text("Your XTM is burnt on Tari's main chain, and the same amount arrives here as TARI, less a small Ootle fee. Clew claims it for you once Ootle accepts it.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Group {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Amount").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                    HStack {
+                        TextField("0.00", text: $amountText)
+                            .textFieldStyle(.roundedBorder)
+                            .monospacedDigit()
+                        Text("XTM").foregroundStyle(.secondary)
+                    }
+                    if !amountText.trimmingCharacters(in: .whitespaces).isEmpty && amount == nil {
+                        hint("Enter just a number, like \(XTM.example). No thousands separators.", warn: true)
+                    } else {
+                        hint("Available: \(XTM.format(model.balance.available)) XTM", warn: false)
+                    }
+                }
+
+                if let fee, let total {
+                    VStack(spacing: 4) {
+                        row("Network fee", XTM.format(fee))
+                        row("Total", XTM.format(total)).fontWeight(.semibold)
+                    }
+                    .font(.callout)
+                    .padding(10)
+                    .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+                    if total > model.balance.available {
+                        hint("Amount plus fee is more than your available balance.", warn: true)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("I understand this is one-way: TARI can't be turned back into XTM.", isOn: $understandsOneWay)
+                    Toggle("I understand the TARI takes about a day to arrive.", isOn: $understandsWait)
+                }
+                .toggleStyle(.checkbox)
+                .font(.callout)
+            }
+            .disabled(!model.canMoveToTari)
+
+            Spacer()
+            HStack {
+                Button("Cancel") { dismiss() }
+                Spacer()
+                if moving { ProgressView().controlSize(.small) }
+                Button("Move \(amount.map { XTM.format($0) } ?? "") XTM") { Task { await move() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canMove)
+            }
+        }
+        .padding(24)
+        .frame(width: 420, height: 560)
+        .task { if model.canMoveToTari { tiers = await model.feeTiers() } }
+        .onAppear { walletID = model.activeID }
+        .passwordPrompt("Move \(XTM.format(amount ?? 0)) XTM to TARI", isPresented: $askingPassword) { typed in
+            Task { await move(password: typed) }
+        }
+        .alert("Couldn't move", isPresented: .init(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("OK") {}
+        } message: { Text(error ?? "") }
+    }
+
+    private func move(password: String? = nil) async {
+        guard let amount else { return }
+        moving = true
+        defer { moving = false }
+        do {
+            try await model.moveToTari(amount: amount, feePerGram: feePerGram, from: walletID, password: password)
+            dismiss()
+        } catch is AppModel.PasswordNeeded {
+            askingPassword = true
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func hint(_ text: String, warn: Bool) -> some View {
+        Text(text).font(.caption).foregroundStyle(warn ? Color.orange : .secondary)
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        HStack { Text(label); Spacer(); Text("\(value) XTM").monospacedDigit() }
     }
 }
