@@ -31,9 +31,5 @@ rm -rf /Applications/Clew.app
 ditto "$APP" /Applications/Clew.app
 # Xcode registers the copies it builds with macOS; leaving them makes duplicates of Clew that can
 # hide it from the Dock's Apps view.
-LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
-for copy in "$APP" "$APP/Contents/Helpers/Clew Testnet.app" "$(dirname "$APP")/Clew Testnet.app"; do
-  "$LSREGISTER" -u "$ROOT/$copy" 2>/dev/null || true
-done
-"$LSREGISTER" -f /Applications/Clew.app 2>/dev/null || true
+scripts/unregister-build-copies.sh
 echo "Installed /Applications/Clew.app ($(du -sh /Applications/Clew.app | cut -f1))"

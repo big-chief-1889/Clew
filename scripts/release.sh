@@ -89,4 +89,5 @@ echo "  clean"
 ZIP="Clew-$VERSION-mac.zip"
 (cd "$OUT" && TZ=UTC ditto -c -k --norsrc --noextattr --noqtn --keepParent Clew.app "$ZIP" && shasum -a 256 "$ZIP" > SHA256SUMS.txt)
 rm -rf "$STAGE"
+scripts/unregister-build-copies.sh
 echo "Done: build/release/$ZIP ($(du -h "$OUT/$ZIP" | cut -f1)) and build/release/SHA256SUMS.txt"
