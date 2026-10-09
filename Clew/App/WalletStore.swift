@@ -80,6 +80,23 @@ struct WalletStore: Codable {
         }
     }
 
+    /// Clew 0.7 kept a TARI side on Ootle's testnet inside mainnet wallets (in "ootle-<testnet>"
+    /// folders). Testnet now lives only in Clew Testnet, so the mainnet app removes those folders.
+    /// Only folders inside this app's wallet folders are touched, and never the wallet files.
+    static func deleteTestnetOotleData() {
+        guard !Config.isTestnet else { return }
+        let fm = FileManager.default
+        guard let wallets = try? fm.contentsOfDirectory(at: networkDirectory(), includingPropertiesForKeys: [.isDirectoryKey])
+        else { return }
+        for wallet in wallets {
+            for network in ["esmeralda", "igor", "localnet"] {
+                let leftover = wallet.appendingPathComponent("ootle-\(network)", isDirectory: true)
+                if fm.fileExists(atPath: leftover.path) { try? fm.removeItem(at: leftover) }
+            }
+        }
+        UserDefaults.standard.removeObject(forKey: "showOotleTestnet")
+    }
+
     func removeFiles(of wallet: WalletProfile) throws {
         guard !wallet.folder.isEmpty else { return }  // never delete the network directory itself
         let directory = try Self.networkDirectory().appendingPathComponent(wallet.folder, isDirectory: true)

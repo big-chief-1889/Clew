@@ -59,7 +59,10 @@ final class AppModel {
     private(set) var tariMoveProblem: String?
     /// Moving XTM to TARI needs both on the same network. Until Ootle launches, Clew's mainnet
     /// wallets and Ootle's testnet don't match, so it's off (moving real XTM there would lose it).
-    var canMoveToTari: Bool { Config.network == Config.ootleNetwork }
+    var canMoveToTari: Bool { Config.ootleAvailable && Config.network == Config.ootleNetwork }
+    /// The XTM | TARI switch: always there (as a preview until Ootle runs on this network), and in
+    /// Clew Testnet while the TARI side is switched on.
+    var showsTariSide: Bool { Config.ootleAvailable ? showOotle : true }
 
     var activeWallet: WalletProfile? { wallets.first { $0.id == activeID } }
 
@@ -116,6 +119,7 @@ final class AppModel {
             phase = .problem(error.localizedDescription)
         }
         WalletStore.deleteOldLogs()
+        WalletStore.deleteTestnetOotleData()
 
         // Lock whenever the Mac sleeps, the screen locks or turns off, or the user switches away.
         let center = NSWorkspace.shared.notificationCenter
@@ -761,7 +765,7 @@ final class AppModel {
 
     /// Opens the open wallet's Ootle wallet in the background, if the TARI side is on.
     private func startOotle() {
-        guard showOotle, ootle == nil, ootleState != .opening, let core = wallet, let id = activeID,
+        guard Config.ootleAvailable, showOotle, ootle == nil, ootleState != .opening, let core = wallet, let id = activeID,
               let profile = activeWallet, let password = sessionPassword else { return }
         let directory: URL
         do {

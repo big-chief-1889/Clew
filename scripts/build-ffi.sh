@@ -23,10 +23,13 @@ case "$NETWORK" in
   esme)
     export TARI_NETWORK=esme TARI_TARGET_NETWORK=testnet TARI_NETWORK_DIR=testnet
     APP_NETWORK=esmeralda NODE_URL=https://rpc.esmeralda.tari.com IS_TESTNET=true
+    OOTLE_AVAILABLE=true OOTLE_NETWORK=esmeralda OOTLE_INDEXER=https://ootle-indexer-a.tari.com/ OOTLE_PREFIX=otl_esm_1
     OUT="$ROOT/Frameworks/TariFFI-testnet" CONFIG="$ROOT/Config/Testnet/Config.swift" ;;
   mainnet)
     export TARI_NETWORK=mainnet TARI_TARGET_NETWORK=mainnet TARI_NETWORK_DIR=mainnet
     APP_NETWORK=mainnet NODE_URL=https://rpc.tari.com IS_TESTNET=false
+    # Ootle has no mainnet yet (no indexer to talk to), so Clew shows its TARI side as a preview.
+    OOTLE_AVAILABLE=false OOTLE_NETWORK=mainnet OOTLE_INDEXER= OOTLE_PREFIX=otl_1
     OUT="$ROOT/Frameworks/TariFFI" CONFIG="$ROOT/Config/Mainnet/Config.swift" ;;
   *) echo "unknown network: $NETWORK" >&2; exit 1 ;;
 esac
@@ -86,10 +89,11 @@ enum Config {
     static let network = "$APP_NETWORK"
     static let defaultNodeURL = "$NODE_URL"
     static let isTestnet = $IS_TESTNET
-    // Ootle (Tari's layer 2) has no mainnet yet, so both builds use its testnet.
-    static let ootleNetwork = "esmeralda"
-    static let ootleIndexerURL = "https://ootle-indexer-a.tari.com/"
-    static let ootleAddressPrefix = "otl_esm_1"
+    /// Whether Ootle (Tari's layer 2) runs on this network yet. If not, the TARI side is a preview.
+    static let ootleAvailable = $OOTLE_AVAILABLE
+    static let ootleNetwork = "$OOTLE_NETWORK"
+    static let ootleIndexerURL = "$OOTLE_INDEXER"
+    static let ootleAddressPrefix = "$OOTLE_PREFIX"
 }
 EOF
 echo "Built $NETWORK wallet library -> $OUT"

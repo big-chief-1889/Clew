@@ -14,7 +14,7 @@ struct HomeView: View {
         var id: Self { self }
     }
 
-    private var showingTari: Bool { asset == .tari && model.showOotle }
+    private var showingTari: Bool { asset == .tari && model.showsTariSide }
 
     enum Sheet: Identifiable {
         case send, receive, settings, add(AddWalletSheet.Mode), detail(WalletTransaction), tariSend, tariReceive, moveToTari
@@ -111,14 +111,14 @@ struct HomeView: View {
         HStack(spacing: 8) {
             WalletSidebarButton { showingWallets = true }
             Spacer()
-            if model.showOotle {
+            if model.showsTariSide {
                 Picker("Currency", selection: $asset) {
                     ForEach(Asset.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(width: 130)
-                .help("XTM on Tari's main chain, or TARI on Ootle (testnet)")
+                .help("XTM on Tari's main chain, or TARI on Ootle, Tari's layer 2")
                 Spacer()
             }
             IconButton(systemImage: model.hideBalance ? "eye.slash" : "eye",

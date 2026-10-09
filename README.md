@@ -11,6 +11,7 @@ Make a wallet or restore one from your 24 words, then send and receive XTM. Your
 - only talks to the node you pick (`rpc.tari.com` by default), no silent fallback to another server
 - fees come from the node's mempool when the network is busy, capped at 100 µT per gram
 - payment references, so you can prove you paid someone
+- a TARI side for Ootle, Tari's layer 2: a preview until Ootle launches, working on Ootle's testnet in Clew Testnet
 - no accounts, no analytics, no log files
 
 Runs on:

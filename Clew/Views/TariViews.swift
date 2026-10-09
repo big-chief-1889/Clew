@@ -10,13 +10,17 @@ struct TariSide: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TariCard()
-                .padding(.horizontal, 20)
-            actions
-                .padding(.horizontal, 20)
-                .padding(.top, 14)
-            history
-                .padding(.top, 12)
+            if Config.ootleAvailable {
+                TariCard()
+                    .padding(.horizontal, 20)
+                actions
+                    .padding(.horizontal, 20)
+                    .padding(.top, 14)
+                history
+                    .padding(.top, 12)
+            } else {
+                preview
+            }
         }
         .alert("Something went wrong", isPresented: .init(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("OK") {}
@@ -24,6 +28,57 @@ struct TariSide: View {
     }
 
     private var ready: Bool { model.ootleState == .ready }
+
+    /// Before Ootle runs on this network: what's coming, nothing working.
+    @ViewBuilder private var preview: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("TARI")
+                .font(.callout.weight(.medium))
+                .opacity(0.8)
+            Text("Opens when Ootle launches")
+                .font(.system(size: 26, weight: .bold, design: .rounded))
+                .padding(.top, 10)
+            Text("Tari's layer 2, for fast, private payments")
+                .font(.caption.weight(.medium))
+                .opacity(0.85)
+                .padding(.top, 8)
+        }
+        .foregroundStyle(.white)
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            CardBackground(top: Theme.tariCardTop, bottom: Theme.tariCardBottom)
+                .shadow(color: Theme.tariCardTop.opacity(0.3), radius: 12, y: 6)
+        }
+        .padding(.horizontal, 20)
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Button {} label: { Label("Send", systemImage: "arrow.up") }
+                    .buttonStyle(.wide)
+                    .disabled(true)
+                Button {} label: { Label("Receive", systemImage: "arrow.down") }
+                    .buttonStyle(.wideSecondary)
+                    .disabled(true)
+            }
+            Button { open(.moveToTari) } label: { Label("Move XTM to TARI", systemImage: "arrow.right.circle") }
+                .buttonStyle(.wideSecondary)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 14)
+        VStack(spacing: 12) {
+            YarnBallView()
+                .frame(width: 84, height: 84)
+                .opacity(0.9)
+            Text("Coming with Ootle")
+                .font(.headline)
+            Text("When Ootle goes live, this side holds your TARI, from the same recovery words as your XTM, and you can move XTM over. Until then nothing here runs or connects. To try it out now, switch to testnet wallets.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, 30)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 
     private var actions: some View {
         VStack(spacing: 10) {
