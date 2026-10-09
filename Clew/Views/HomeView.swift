@@ -64,6 +64,7 @@ struct HomeView: View {
 
     private var content: some View {
         VStack(spacing: 0) {
+            if Config.isTestnet { TestnetBadge() }
             topBar
             if showingTari {
                 TariSide(open: { sheet = $0 })

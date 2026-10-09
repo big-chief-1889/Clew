@@ -18,7 +18,8 @@ struct RootView: View {
         .fontDesign(.rounded)
         .animation(.smooth(duration: 0.4), value: model.phase)
         .overlay(alignment: .top) {
-            if Config.isTestnet { TestnetBadge() }
+            // The wallet screen gives the badge a row of its own, so it doesn't cover the top bar.
+            if Config.isTestnet && model.phase != .unlocked { TestnetBadge() }
         }
         .alert("Something went wrong", isPresented: .init(
             get: { model.errorMessage != nil },
