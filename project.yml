@@ -11,7 +11,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     ARCHS: arm64
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.7.0"
+    MARKETING_VERSION: "0.8.0"
     CURRENT_PROJECT_VERSION: "1"
     # Where scripts/build-ffi.sh puts the wallet libraries (release.sh points this elsewhere).
     CLEW_FFI_ROOT: $(SRCROOT)/Frameworks

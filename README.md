@@ -19,8 +19,6 @@ Runs on:
 - Mac: Apple Silicon, macOS 14 or later (SwiftUI)
 - Tari mainnet, plus Clew Testnet for Tari's testnet (inside Clew, see below)
 
-> **Heads up:** Clew hasn't been audited. Start with small amounts and keep your 24 words on paper.
-
 ## Download
 
 Get the latest build from Releases. Unzip it and drag Clew to Applications.
