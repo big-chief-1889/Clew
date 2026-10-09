@@ -880,6 +880,7 @@ dependencies = [
  "rand 0.10.1",
  "serde",
  "serde_json",
+ "tari_common",
  "tari_common_types",
  "tari_crypto",
  "tari_engine_types",

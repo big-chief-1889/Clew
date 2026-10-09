@@ -40,7 +40,54 @@ use tari_transaction_components::{
     transaction_components::{MemoField, memo_field::TxType},
 };
 
-use super::{FINALISE_TIMEOUT, OotleWallet, wait_for_account_update};
+use super::{FINALISE_TIMEOUT, OotleWallet, tari, wait_for_account_update};
+
+/// The smallest burn Clew makes, in µT: comfortably above what claiming it on Ootle costs, so the
+/// claim can always pay for itself.
+pub const MIN_BURN: u64 = 10_000_000;
+
+/// The most a claim may spend on its fee, in µT, and at most this fraction of the amount claimed.
+/// Claims are made automatically, so the indexer's price is checked against both.
+const CLAIM_FEE_CAP: u64 = 1_000_000;
+const CLAIM_FEE_CAP_DIVISOR: u64 = 10;
+
+/// A burn the network (rather than this wallet) says is claimed is checked again after this long, so
+/// one wrong answer can't hide a burn for good.
+const RECHECK_AFTER_SECS: i64 = 24 * 60 * 60;
+
+/// The L1 wallet's burns, read in one quick step so the claim pass that follows (which waits on the
+/// network) doesn't hold the L1 wallet.
+pub struct BurnSnapshot {
+    network: tari_common::configuration::Network,
+    burns: Vec<minotari_wallet::storage::sqlite_db::models::DbBurnProof>,
+}
+
+impl BurnSnapshot {
+    pub fn of(l1: &WalletSqlite) -> anyhow::Result<Self> {
+        Ok(Self {
+            network: l1.network.as_network(),
+            burns: l1.db.get_all_burn_proofs()?,
+        })
+    }
+}
+
+/// A burn known to be claimed, and who said so.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct Claimed {
+    /// This wallet's own claim was accepted (true), or the network reported the claim's tombstone.
+    by_clew: bool,
+    /// Unix seconds of the last check.
+    checked: i64,
+}
+
+type ClaimedBurns = std::collections::BTreeMap<String, Claimed>;
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 /// What a pass over the wallet's burns did.
 #[derive(Debug, Default)]
@@ -79,7 +126,7 @@ impl OotleWallet {
             "the base layer wallet is on {l1_network} but the Ootle wallet is on {}, so the burn could never be claimed",
             self.network
         );
-        anyhow::ensure!(amount > 0, "the amount must be more than zero");
+        anyhow::ensure!(amount >= MIN_BURN, "the smallest amount Clew moves is {} XTM", tari(MIN_BURN));
 
         // L1 makes the burn out to a one-time key derived from this account key, so only this account
         // can claim it and the burn can't be linked to the account on chain.
@@ -99,23 +146,29 @@ impl OotleWallet {
         Ok(tx_id.as_u64())
     }
 
-    /// Claims every burn from `l1` to this account that Ootle will now accept, skipping ones already
-    /// claimed. The L1 wallet completes a burn's proof once it is confirmed; Ootle accepts the claim
-    /// once its own view of L1 has moved past the epoch the burn was mined in.
-    pub fn claim_burns(&self, l1: &WalletSqlite) -> anyhow::Result<ClaimSummary> {
+    /// Claims every burn in `snapshot` to this account that Ootle will now accept, skipping ones
+    /// already claimed. The L1 wallet completes a burn's proof once it is confirmed; Ootle accepts the
+    /// claim once its own view of L1 has moved past the epoch the burn was mined in.
+    pub fn claim_burns(&self, snapshot: &BurnSnapshot) -> anyhow::Result<ClaimSummary> {
+        let _one_at_a_time = self.claiming.lock().unwrap_or_else(|e| e.into_inner());
         let account = self.sdk.accounts_api().get_account_by_address(&self.account)?;
         let owner_key = account.account.owner_public_key;
-        let consensus = ConsensusManager::builder(l1.network.as_network()).build();
+        let consensus = ConsensusManager::builder(snapshot.network).build();
         let mut summary = ClaimSummary::default();
         let mut claimed = self.claimed_burns();
 
-        for burn in l1.db.get_all_burn_proofs()? {
+        for burn in &snapshot.burns {
             let commitment = burn.burn_proof.commitment.to_hex();
-            if burn.burn_proof.claim_public_key.as_bytes() != owner_key.as_bytes() || claimed.contains(&commitment) {
+            if burn.burn_proof.claim_public_key.as_bytes() != owner_key.as_bytes() {
                 continue;
             }
+            if let Some(known) = claimed.get(&commitment) {
+                if known.by_clew || now() - known.checked < RECHECK_AFTER_SECS {
+                    continue;
+                }
+            }
             let (Some(output_proof), Some(encrypted_data), Some(value)) =
-                (burn.burn_output_proof, burn.encrypted_data, burn.value)
+                (burn.burn_output_proof.clone(), burn.encrypted_data.clone(), burn.value)
             else {
                 summary.waiting += 1;
                 continue;
@@ -124,8 +177,8 @@ impl OotleWallet {
             let mined_in_epoch = consensus.consensus_constants(height).block_height_to_epoch(height).as_u64();
             let attempt = (|| -> anyhow::Result<Option<bool>> {
                 let claim = claim_proof_from_l1(&BurnClaimProof {
-                    burn_public_key: burn.burn_proof.claim_public_key,
-                    ownership_proof: burn.burn_proof.ownership_proof,
+                    burn_public_key: burn.burn_proof.claim_public_key.clone(),
+                    ownership_proof: burn.burn_proof.ownership_proof.clone(),
                     output_proof,
                     value: value.as_u64(),
                 })
@@ -142,38 +195,43 @@ impl OotleWallet {
             })();
             match attempt {
                 Ok(None) => {
-                    claimed.insert(commitment);
+                    claimed.insert(commitment, Claimed { by_clew: false, checked: now() });
                 },
                 Ok(Some(true)) => {
-                    claimed.insert(commitment);
+                    claimed.insert(commitment, Claimed { by_clew: true, checked: now() });
                     summary.claimed += 1;
                 },
-                Ok(Some(false)) => summary.waiting += 1,
+                Ok(Some(false)) => {
+                    claimed.remove(&commitment);
+                    summary.waiting += 1;
+                },
                 Err(e) => {
+                    claimed.remove(&commitment);
                     summary.waiting += 1;
                     summary.problem.get_or_insert(format!("{e:#}"));
                 },
             }
         }
-        self.save_claimed_burns(&claimed)?;
+        if let Err(e) = self.save_claimed_burns(&claimed) {
+            summary.problem.get_or_insert(format!("couldn't record the claims: {e:#}"));
+        }
         Ok(summary)
     }
 
-    /// The burns to this account from `l1` and how far each has got, newest first, as JSON. Reads
+    /// The burns to this account in `snapshot` and how far each has got, newest first, as JSON. Reads
     /// local data only.
-    pub fn burns_json(&self, l1: &WalletSqlite) -> anyhow::Result<String> {
+    pub fn burns_json(&self, snapshot: &BurnSnapshot) -> anyhow::Result<String> {
         let account = self.sdk.accounts_api().get_account_by_address(&self.account)?;
         let owner_key = account.account.owner_public_key;
         let claimed = self.claimed_burns();
-        let mut entries = l1
-            .db
-            .get_all_burn_proofs()?
-            .into_iter()
+        let mut entries = snapshot
+            .burns
+            .iter()
             .filter(|b| b.burn_proof.claim_public_key.as_bytes() == owner_key.as_bytes())
             .map(|b| BurnEntry {
                 amount: b.value.map(|v| v.as_u64()).unwrap_or(0),
                 time: b.created_at.and_utc().timestamp(),
-                status: if claimed.contains(&b.burn_proof.commitment.to_hex()) {
+                status: if claimed.contains_key(&b.burn_proof.commitment.to_hex()) {
                     "claimed"
                 } else if b.burn_output_proof.is_some() {
                     "waiting"
@@ -186,14 +244,14 @@ impl OotleWallet {
         Ok(serde_json::to_string(&entries)?)
     }
 
-    fn claimed_burns(&self) -> std::collections::BTreeSet<String> {
+    fn claimed_burns(&self) -> ClaimedBurns {
         std::fs::read(self.directory.join(CLAIMED_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default()
     }
 
-    fn save_claimed_burns(&self, claimed: &std::collections::BTreeSet<String>) -> anyhow::Result<()> {
+    fn save_claimed_burns(&self, claimed: &ClaimedBurns) -> anyhow::Result<()> {
         let path = self.directory.join(CLAIMED_FILE);
         let temporary = path.with_extension("json.new");
         std::fs::write(&temporary, serde_json::to_vec(claimed)?)?;
@@ -222,17 +280,36 @@ impl OotleWallet {
             }
             anyhow::bail!("Ootle won't accept the claim: {reason}");
         }
+        // The claim's fee is paid automatically and isn't refunded, so the indexer's price must be sane.
+        let fee = result.required_fees();
+        let cap = CLAIM_FEE_CAP.min(claim.value / CLAIM_FEE_CAP_DIVISOR);
+        anyhow::ensure!(
+            fee <= cap,
+            "claiming {} TARI would cost a fee of {} TARI, more than Clew allows ({} TARI); not claiming it",
+            tari(claim.value),
+            tari(fee),
+            tari(cap)
+        );
 
-        let transaction = self.build_claim(claim, encrypted_data, result.required_fees(), false)?;
+        let transaction = self.build_claim(claim, encrypted_data, fee, false)?;
+        let id = transaction.calculate_id();
         self.runtime.block_on(async {
             let mut events = self.notify.subscribe();
-            let id = self
-                .transactions
+            self.transactions
                 .submit_transaction_with_opts(transaction, Some(TransactionContext::with_accounts([self.account])), None)
                 .await?;
             let finalised = tokio::time::timeout(FINALISE_TIMEOUT, wait_for_account_update(&mut events, &id, &self.account))
                 .await
-                .context("the network hasn't confirmed the claim yet")??;
+                .ok()
+                .transpose()?
+                .flatten();
+            let Some(finalised) = finalised else {
+                // Not settled yet: the next pass finds it claimed, or tries again.
+                return Ok(matches!(
+                    self.sdk.transaction_api().get(id).map(|t| t.status),
+                    Ok(tari_ootle_wallet_sdk::models::TransactionStatus::Accepted)
+                ));
+            };
             match finalised.finalize.any_reject() {
                 None => Ok(true),
                 Some(reason) if is_not_yet_claimable(reason) => Ok(false),

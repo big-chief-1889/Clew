@@ -149,6 +149,9 @@ final class OotleCore {
         try using { handle in try ootle { clew_ootle_estimate_send_fee(handle, address, amount, $0) } }
     }
 
+    /// The smallest move from XTM, in µT: comfortably above what claiming it costs.
+    static var minimumMove: MicroTari { clew_ootle_min_burn() }
+
     /// Burns `amount` of XTM from the main wallet `l1` to this account, at `feePerGram`. One way:
     /// the XTM can't come back. Refused when the two wallets are on different networks.
     func moveFromMainWallet(_ l1: WalletCore, amount: MicroTari, feePerGram: MicroTari) throws {
@@ -160,40 +163,60 @@ final class OotleCore {
         }
     }
 
+    /// The main wallet's moves, read in a quick local step, so what follows doesn't hold it while
+    /// waiting on the network.
+    private func snapshot(of l1: WalletCore) throws -> OpaquePointer {
+        let snapshot = try l1.using { l1Handle in try ootle { clew_burn_snapshot(l1Handle, $0) } }
+        guard let snapshot else { throw OotleError(message: "Couldn't read the moves.") }
+        return snapshot
+    }
+
     /// Moves from `l1` to this account, newest first. Reads local data only.
     func moves(from l1: WalletCore) throws -> [OotleMove] {
-        try using { handle in
-            try l1.using { l1Handle in
-                let pointer = try ootle { clew_ootle_burns(handle, l1Handle, $0) }
-                defer { clew_string_destroy(pointer) }
-                guard let pointer else { return [] }
-                return try JSONDecoder().decode([OotleMove].self, from: Data(String(cString: pointer).utf8))
-            }
+        let snapshot = try snapshot(of: l1)
+        defer { clew_burn_snapshot_destroy(snapshot) }
+        return try using { handle in
+            let pointer = try ootle { clew_ootle_burns(handle, snapshot, $0) }
+            defer { clew_string_destroy(pointer) }
+            guard let pointer else { return [] }
+            return try JSONDecoder().decode([OotleMove].self, from: Data(String(cString: pointer).utf8))
         }
     }
 
     /// Claims every move Ootle accepts now. Returns how many were claimed, and why one couldn't be
     /// (the others are still tried).
     func claimMoves(from l1: WalletCore) throws -> (claimed: Int, problem: String?) {
-        try using { handle in
-            try l1.using { l1Handle in
-                var code: Int32 = 0
-                let claimed = clew_ootle_claim_burns(handle, l1Handle, nil, &code)
-                var problem: String?
-                if code != 0 {
-                    let pointer = clew_last_error()
-                    defer { clew_string_destroy(pointer) }
-                    problem = pointer.map { String(cString: $0) } ?? "Ootle error \(code)"
-                }
-                if claimed < 0 { throw OotleError(message: problem ?? "Couldn't claim.") }
-                return (Int(claimed), problem)
+        let snapshot = try snapshot(of: l1)
+        defer { clew_burn_snapshot_destroy(snapshot) }
+        return try using { handle in
+            var code: Int32 = 0
+            let claimed = clew_ootle_claim_burns(handle, snapshot, nil, &code)
+            var problem: String?
+            if code != 0 {
+                let pointer = clew_last_error()
+                defer { clew_string_destroy(pointer) }
+                problem = pointer.map { String(cString: $0) } ?? "Ootle error \(code)"
             }
+            if claimed < 0 { throw OotleError(message: problem ?? "Couldn't claim.") }
+            return (Int(claimed), problem)
         }
     }
 
-    /// Sends privately, paying at most `maxFee`. Returns once the network has confirmed it.
-    @discardableResult
-    func send(to address: String, amount: MicroTari, maxFee: MicroTari) throws -> MicroTari {
-        try using { handle in try ootle { clew_ootle_send(handle, address, amount, maxFee, $0) } }
+    enum SendResult: Sendable {
+        /// The network confirmed it, charging this fee.
+        case confirmed(fee: MicroTari)
+        /// Sent, but not confirmed yet. The wallet keeps trying and the funds stay locked: it must not
+        /// be sent again.
+        case pending
+    }
+
+    /// Sends privately, paying at most `maxFee`. Returns once the network has confirmed it, or once
+    /// it's clear that will take longer.
+    func send(to address: String, amount: MicroTari, maxFee: MicroTari) throws -> SendResult {
+        try using { handle in
+            var pending = false
+            let fee = try ootle { clew_ootle_send(handle, address, amount, maxFee, &pending, $0) }
+            return pending ? .pending : .confirmed(fee: fee)
+        }
     }
 }

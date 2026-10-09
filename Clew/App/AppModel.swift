@@ -93,11 +93,15 @@ final class AppModel {
     private var ootleWalletID: UUID?
     /// Bumped whenever the Ootle wallet closes, so results from an older one are dropped.
     private var ootleGeneration = 0
-    /// The proxy route the open Ootle wallet was opened with (it keeps it until reopened).
-    private var ootleRoute: String?
+    /// Bumped whenever the route for new Ootle connections changes. An open Ootle wallet keeps the
+    /// route it opened with, so it's reopened when this moves on from `ootleOpenedRouteVersion`.
+    private var ootleRouteVersion = 0
+    private var ootleOpenedRouteVersion = 0
     /// The route currently set for new Ootle connections.
     private var currentOotleRoute: String?
     private var ootlePoller: Task<Void, Never>?
+    /// The check with the network in progress, so only one runs at a time.
+    private var ootleRefresh: Task<Void, Never>?
 
     /// Thrown when a lock interrupts an operation. Not an error worth showing.
     private struct Interrupted: Error {}
@@ -197,9 +201,10 @@ final class AppModel {
             try? OotleCore.setProxy(TorService.deadProxy)
             ootleRoute = TorService.deadProxy
         }
+        if ootleRoute != currentOotleRoute { ootleRouteVersion += 1 }
         currentOotleRoute = ootleRoute
         // An open Ootle wallet keeps the route it opened with: reopen it on the new one.
-        if ootle != nil, ootleWalletID == proxyWalletID, self.ootleRoute != ootleRoute {
+        if ootle != nil, ootleWalletID == proxyWalletID, ootleOpenedRouteVersion != ootleRouteVersion {
             stopOotle()
             startOotle()
         }
@@ -776,8 +781,18 @@ final class AppModel {
             return
         }
         ootleState = .opening
-        let generation = ootleGeneration, epoch = lockEpoch, route = currentOotleRoute
-        Task {
+        let generation = ootleGeneration, epoch = lockEpoch
+        // Not wanted any more once Clew locks, switches wallets or turns Ootle off.
+        let wanted = { [unowned self] in
+            ootleGeneration == generation && lockEpoch == epoch && activeID == id && wallet === core
+        }
+        // The open joins the wallet's queue of closings: it starts once any earlier Ootle wallet on these
+        // files has shut down, and whatever later closes or deletes them waits for it to finish.
+        let previous = closing[id]
+        closing[id] = Task {
+            await previous?.value
+            guard wanted() else { return }
+            let routeVersion = ootleRouteVersion
             let result = await Task.detached { () -> Result<(OotleCore, String), Error> in
                 Result {
                     let opened = try OotleCore(l1: core, directory: directory, network: Config.ootleNetwork,
@@ -785,26 +800,23 @@ final class AppModel {
                     return (opened, try opened.address)
                 }
             }.value
-            // Clew locked, switched wallets or turned Ootle off meanwhile: this one isn't wanted.
-            guard ootleGeneration == generation, lockEpoch == epoch, activeID == id, wallet === core else {
-                if case .success(let (opened, _)) = result { retireOotle(opened, id: id) }
-                return
-            }
             switch result {
-            case .success(let (opened, address)):
+            case .success(let (opened, address)) where wanted():
                 ootle = opened
                 ootleWalletID = id
-                ootleRoute = route
+                ootleOpenedRouteVersion = routeVersion
                 ootleAddress = address
                 ootleState = .ready
-                if route != currentOotleRoute {  // the route changed while it was opening
+                if routeVersion != ootleRouteVersion {  // the route changed while it was opening
                     stopOotle()
                     startOotle()
-                    return
+                } else {
+                    startOotlePolling()
                 }
-                startOotlePolling()
+            case .success(let (opened, _)):
+                await Task.detached { opened.shutdown() }.value
             case .failure(let error):
-                ootleState = .failed(error.localizedDescription)
+                if wanted() { ootleState = .failed(error.localizedDescription) }
             }
         }
     }
@@ -817,7 +829,6 @@ final class AppModel {
         if let old = ootle, let id = ootleWalletID { retireOotle(old, id: id) }
         ootle = nil
         ootleWalletID = nil
-        ootleRoute = nil
         ootleState = .off
         tariBalance = 0
         tariHistory = []
@@ -854,15 +865,24 @@ final class AppModel {
     }
 
     /// Scans for payments and claims moves from XTM that are ready, then reads the balance,
-    /// history and moves. Offline, it still shows what's known.
+    /// history and moves. Offline, it still shows what's known. One check runs at a time; a call
+    /// made during one waits for it, then checks again.
     func refreshOotle() async {
+        while let running = ootleRefresh { await running.value }
+        let check = Task { await checkOotle(); ootleRefresh = nil }
+        ootleRefresh = check
+        await check.value
+    }
+
+    private func checkOotle() async {
         guard let core = ootle else { return }
         let l1 = wallet
         let generation = ootleGeneration
         let update = await Task.detached { () -> OotleUpdate in
             var update = OotleUpdate()
             update.online = (try? core.refresh()) != nil
-            if let l1, update.online, let moves = try? core.moves(from: l1), moves.contains(where: { $0.status == .waiting }) {
+            if let l1, update.online, let moves = try? core.moves(from: l1),
+               moves.contains(where: { $0.status == .waiting || $0.status == .claimed }) {
                 do {
                     update.claimProblem = try core.claimMoves(from: l1).problem
                 } catch {
@@ -915,11 +935,11 @@ final class AppModel {
     /// Returns once the network has confirmed it. Throws `PasswordNeeded` when the password has to
     /// be typed.
     func sendTari(amount: MicroTari, to address: String, maxFee: MicroTari, from walletID: UUID?,
-                  password: String?) async throws {
+                  password: String?) async throws -> OotleCore.SendResult {
         guard ootle != nil, walletID == ootleWalletID else { throw OotleError.closed }
         try await authorize(password: password, reason: "send \(XTM.format(amount)) tTARI")
         guard walletID == ootleWalletID else { throw OotleError.closed }
-        _ = try await withOotle { try $0.send(to: address, amount: amount, maxFee: maxFee) }
+        return try await withOotle { try $0.send(to: address, amount: amount, maxFee: maxFee) }
     }
 
     /// Moves `amount` of XTM from the open wallet to its TARI side (burnt on the main chain, claimed
@@ -927,6 +947,9 @@ final class AppModel {
     /// `PasswordNeeded` when the password has to be typed.
     func moveToTari(amount: MicroTari, feePerGram: MicroTari, from walletID: UUID?, password: String?) async throws {
         guard canMoveToTari else { throw OotleError(message: "Moving XTM to TARI opens when Ootle launches.") }
+        guard amount >= OotleCore.minimumMove else {
+            throw OotleError(message: "The smallest move is \(XTM.format(OotleCore.minimumMove)) XTM.")
+        }
         guard let l1 = wallet, ootle != nil, walletID == activeID, walletID == ootleWalletID else {
             throw OotleError.closed
         }
@@ -1016,8 +1039,16 @@ final class AppModel {
         // at a closed port, so the wallet stays offline rather than connecting directly.
         if useTor { await tor.start() }
         guard lockEpoch == epoch else { throw Interrupted() }
+        // Use this wallet's Tor circuits from the start. If it doesn't open, the wallet that stays open
+        // gets its own circuits back, so the two are never linked by a shared exit.
+        let previousProxyWallet = proxyWalletID
         proxyWalletID = profile.id
         applyProxy()
+        let restoreProxy = { [unowned self] in
+            guard lockEpoch == epoch, proxyWalletID == profile.id else { return }
+            proxyWalletID = previousProxyWallet
+            applyProxy()
+        }
 
         // From here on, events from the wallet that's currently open are ignored.
         let previousGeneration = generation
@@ -1039,6 +1070,7 @@ final class AppModel {
             }.value
         } catch {
             if lockEpoch == epoch { generation = previousGeneration }  // the open wallet stays in charge
+            restoreProxy()
             throw error
         }
         let newAddress: String
@@ -1049,6 +1081,7 @@ final class AppModel {
         } catch {
             retire(core, id: profile.id)
             if lockEpoch == epoch { generation = previousGeneration }
+            restoreProxy()
             throw error
         }
 

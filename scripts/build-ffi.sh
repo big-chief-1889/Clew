@@ -13,7 +13,9 @@ if [ $# -eq 0 ]; then
 fi
 NETWORK="$1"
 TARI_TAG="v6.1.0"
+TARI_COMMIT="463e53d372ce296b2eb1853b9b53d1ab77e1bc87"
 OOTLE_TAG="v0.45.0"
+OOTLE_COMMIT="9c626062673760530ffb075b6b006a67becebe5a"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARI="$ROOT/vendor/tari"
 OOTLE="$ROOT/vendor/tari-ootle"
@@ -34,24 +36,25 @@ case "$NETWORK" in
   *) echo "unknown network: $NETWORK" >&2; exit 1 ;;
 esac
 
-# Refuse to build from anything other than the pinned releases, then apply Clew's changes once:
-# Tari gets Tor proxy support and no silent fallback node, Ootle gets Tor proxy support.
-use_release() { # folder tag patch
+# Refuse to build from anything other than the pinned releases (by commit, since a tag can be moved),
+# then apply Clew's changes once: Tari gets Tor proxy support and no silent fallback node, Ootle gets
+# Tor proxy support.
+use_release() { # folder tag commit patch
   local actual
-  actual="$(git -C "$1" describe --tags --exact-match 2>/dev/null || true)"
-  if [ "$actual" != "$2" ]; then
-    echo "${1#$ROOT/} is at '${actual:-untagged}', expected $2" >&2
+  actual="$(git -C "$1" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$actual" != "$3" ]; then
+    echo "${1#$ROOT/} is at '${actual:-nothing}', expected $2 ($3)" >&2
     exit 1
   fi
-  if git -C "$1" apply --reverse --check "$3" 2>/dev/null; then
+  if git -C "$1" apply --reverse --check "$4" 2>/dev/null; then
     echo "Clew patch already applied to ${1#$ROOT/}"
   else
-    git -C "$1" apply -N "$3"   # -N: new files show up in git diff
-    echo "Applied ${3#$ROOT/}"
+    git -C "$1" apply -N "$4"   # -N: new files show up in git diff
+    echo "Applied ${4#$ROOT/}"
   fi
 }
-use_release "$TARI" "$TARI_TAG" "$ROOT/patches/tari-$TARI_TAG-clew.patch"
-use_release "$OOTLE" "$OOTLE_TAG" "$ROOT/patches/tari-ootle-$OOTLE_TAG-clew.patch"
+use_release "$TARI" "$TARI_TAG" "$TARI_COMMIT" "$ROOT/patches/tari-$TARI_TAG-clew.patch"
+use_release "$OOTLE" "$OOTLE_TAG" "$OOTLE_COMMIT" "$ROOT/patches/tari-ootle-$OOTLE_TAG-clew.patch"
 # The Tari patch adds a dependency between two Tari crates. Record just that in Tari's Cargo.lock
 # (no outside crate changes version); it is what generates wallet.h below.
 cargo update --manifest-path "$TARI/Cargo.toml" --workspace --offline --quiet

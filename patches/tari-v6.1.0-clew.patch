@@ -152,41 +152,50 @@ index ee87a51..b13d577 100644
  tokio = { workspace = true, features = ["macros", "sync"] }
  log = { workspace = true, features = [] }
 diff --git a/clients/rust/base_node_wallet_client/src/client/http.rs b/clients/rust/base_node_wallet_client/src/client/http.rs
-index fa037b0..349fcd1 100644
+index fa037b0..546f09a 100644
 --- a/clients/rust/base_node_wallet_client/src/client/http.rs
 +++ b/clients/rust/base_node_wallet_client/src/client/http.rs
-@@ -66,6 +66,20 @@ fn check_query_size(len: usize, item_name: &str) -> Result<(), anyhow::Error> {
+@@ -66,6 +66,29 @@ fn check_query_size(len: usize, item_name: &str) -> Result<(), anyhow::Error> {
      Ok(())
  }
  
-+/// Proxy for every base node request, e.g. `socks5h://127.0.0.1:9150` for Tor. Set by the host app.
-+static HTTP_PROXY: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
++/// Proxy for every base node request, e.g. `socks5h://127.0.0.1:9150` for Tor, set by the host app.
++/// `None` until the host app sets a route: requests go to a dead proxy until then, so nothing connects
++/// directly by accident. `Some(None)` is a direct connection the host app chose.
++static HTTP_PROXY: std::sync::RwLock<Option<Option<String>>> = std::sync::RwLock::new(None);
 +
-+/// Routes base node requests through `proxy` (or directly when `None`). The wallet creates a client per
-+/// request, so this applies to running wallets from their next request. With a proxy set, requests that
-+/// can't reach it fail rather than connecting directly.
++/// Where requests go when there is no usable route: a closed local port.
++const DEAD_PROXY: &str = "socks5h://127.0.0.1:1";
++
++/// Routes base node requests through `proxy` (or directly when `None`). Only `socks5h://` proxies are
++/// accepted, so DNS lookups go through the proxy too. The wallet creates a client per request, so this
++/// applies to running wallets from their next request. With a proxy set, requests that can't reach it
++/// fail rather than connecting directly.
 +pub fn set_http_proxy(proxy: Option<String>) -> Result<(), anyhow::Error> {
 +    if let Some(proxy) = &proxy {
++        if !proxy.starts_with("socks5h://") {
++            return Err(anyhow!("only socks5h:// proxies are supported"));
++        }
 +        reqwest::Proxy::all(proxy)?;
 +    }
-+    *HTTP_PROXY.write().map_err(|_| anyhow!("proxy setting lock poisoned"))? = proxy;
++    *HTTP_PROXY.write().map_err(|_| anyhow!("proxy setting lock poisoned"))? = Some(proxy);
 +    Ok(())
 +}
 +
  /// HTTP client for the Base Node wallet service.
  pub struct Client {
      local_api_address: Url,
-@@ -77,7 +91,17 @@ pub struct Client {
+@@ -77,7 +100,17 @@ pub struct Client {
  
  impl Client {
      pub fn new(local_api_address: Url, default_seed_address: Url) -> Self {
 -        let http_client_builder = reqwest::Client::builder();
 +        let mut http_client_builder = reqwest::Client::builder();
-+        // If the setting can't be read, use a dead proxy: fail closed rather than connect directly.
-+        let proxy = HTTP_PROXY
-+            .read()
-+            .map(|p| p.clone())
-+            .unwrap_or_else(|_| Some("socks5h://127.0.0.1:1".to_string()));
++        // Unset or unreadable: use a dead proxy, failing closed rather than connecting directly.
++        let proxy = match HTTP_PROXY.read().map(|p| p.clone()) {
++            Ok(Some(route)) => route,
++            _ => Some(DEAD_PROXY.to_string()),
++        };
 +        if let Some(proxy) = proxy {
 +            // An explicit proxy also turns off reqwest's automatic system proxy detection.
 +            http_client_builder =

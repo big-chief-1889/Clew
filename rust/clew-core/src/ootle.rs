@@ -1,7 +1,8 @@
 //! An Ootle (Tari L2) wallet, run in-process with the Ootle wallet SDK and its services: the stealth
 //! UTXO scanner, the account monitor and the transaction service. Its keys come from the same
-//! 24-word seed as the L1 wallet (same derivation as Ootle's own wallet), and its database is
-//! encrypted with the Clew password.
+//! 24-word seed as the L1 wallet (same derivation as Ootle's own wallet; a separate derived seed on
+//! test networks). The seed is stored encrypted with the Clew password; the rest of the database
+//! (address, balances, history) is not encrypted.
 
 use std::{
     path::{Path, PathBuf},
@@ -34,7 +35,15 @@ use tari_ootle_wallet_sdk::{
     cipher_seed::CipherSeedRestore,
     crypto::{memo::Memo, pay_to::PayTo},
     local_key_store::LocalKeyStore,
-    models::{EpochBirthday, NewAccountData, TransactionContext, TransactionContextKind, WalletEvent},
+    models::{
+        AccountWithAddress,
+        EpochBirthday,
+        NewAccountData,
+        TransactionContext,
+        TransactionContextKind,
+        TransactionStatus,
+        WalletEvent,
+    },
     network::WalletNetworkInterface,
 };
 use tari_ootle_wallet_sdk_services::{
@@ -63,6 +72,8 @@ use zeroize::Zeroizing;
 
 mod bridge;
 
+pub use bridge::{BurnSnapshot, MIN_BURN};
+
 pub struct ClewSpec;
 
 impl WalletSdkSpec for ClewSpec {
@@ -89,6 +100,23 @@ const MAX_FEE_ESTIMATE_ROUNDS: usize = 5;
 /// How long to wait for a submitted transaction to be finalised.
 const FINALISE_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// The most Clew pays in fees for one TARI send, in µT. Ootle's fees are a small fraction of this; the
+/// cap stops a dishonest or broken indexer from pricing a send at the whole balance.
+pub(crate) const SEND_FEE_CAP: u64 = 1_000_000;
+
+/// File in the wallet's folder identifying the seed the wallet was made from (a one-way hash), so a
+/// folder from another seed is refused before anything in it is changed.
+const SEED_ID_FILE: &str = "clew-seed-id";
+
+/// How a send ended, as far as Clew can tell.
+pub enum SendOutcome {
+    /// The network accepted it; `fee` µT was charged.
+    Confirmed { fee: u64 },
+    /// Submitted, but not confirmed yet. The wallet keeps trying it and its funds stay locked, so it
+    /// must not be sent again.
+    Pending,
+}
+
 pub struct OotleWallet {
     runtime: Runtime,
     shutdown: Shutdown,
@@ -102,6 +130,8 @@ pub struct OotleWallet {
     network: Network,
     /// The wallet's folder.
     directory: PathBuf,
+    /// One claim pass at a time, so two never claim the same burn or write the claimed list together.
+    claiming: std::sync::Mutex<()>,
 }
 
 impl OotleWallet {
@@ -117,7 +147,17 @@ impl OotleWallet {
 
         let store = SqliteWalletStore::try_open(directory.join("ootle.sqlite")).context("opening the Ootle database")?;
         store.run_migrations()?;
-        // The stored seed is the L1 wallet's seed, encrypted with the Clew password. Re-encrypt it with
+        // Refuse a folder made for another network or from another seed before changing anything in it.
+        if let Some(stored) = Sdk::get_store_network(&store)? {
+            anyhow::ensure!(stored == network, "this Ootle wallet is for {stored}, not {network}");
+        }
+        let seed_id = seed_id(seed);
+        let seed_id_path = directory.join(SEED_ID_FILE);
+        let known_seed_id = std::fs::read_to_string(&seed_id_path).ok();
+        if let Some(known) = &known_seed_id {
+            anyhow::ensure!(known.trim() == seed_id, "this Ootle wallet was made from a different seed");
+        }
+        // The stored seed is this wallet's seed, encrypted with the Clew password. Re-encrypt it with
         // the current password each time, so a password change made while this wallet was closed
         // carries over. (A first open has no stored seed yet; the SDK stores it below.)
         let config_api = ConfigApi::new(&store);
@@ -149,19 +189,18 @@ impl OotleWallet {
             AccountMonitor::new(notify.clone(), sdk.clone(), scanner.clone(), shutdown.to_signal());
         runtime.spawn(account_monitor_service.run());
 
-        // Clew uses the first account (key index 0), as Ootle's own wallet does for its default account.
-        let keys = sdk.key_manager_api().derive_account_address(0)?;
-        let accounts = sdk.accounts_api();
-        let account = if accounts.any_accounts_exist()? {
-            let account = accounts.get_default()?;
+        // A folder from before the seed id was recorded: its default account must be this seed's.
+        if known_seed_id.is_none() && sdk.accounts_api().any_accounts_exist()? {
+            let keys = sdk.key_manager_api().derive_account_address(0)?;
             anyhow::ensure!(
-                account.account.owner_public_key == keys.address.account_key().to_byte_type(),
+                sdk.accounts_api().get_default()?.account.owner_public_key == keys.address.account_key().to_byte_type(),
                 "this Ootle wallet was made from a different seed"
             );
-            account
-        } else {
-            accounts.create_account(Some("Clew"), true, keys)?
-        };
+        }
+        let account = clew_account(&sdk)?;
+        if known_seed_id.is_none() {
+            std::fs::write(&seed_id_path, &seed_id)?;
+        }
 
         if needs_recovery {
             let birthday = sdk.key_manager_api().get_cipher_seed_birthday_epoch()?;
@@ -191,6 +230,7 @@ impl OotleWallet {
             scanner,
             network,
             directory: directory.to_path_buf(),
+            claiming: std::sync::Mutex::new(()),
         })
     }
 
@@ -263,7 +303,10 @@ impl OotleWallet {
                 .await?;
             let finalised = tokio::time::timeout(FINALISE_TIMEOUT, wait_for_account_update(&mut events, &id, &self.account))
                 .await
-                .context("timed out waiting for the faucet transaction")??;
+                .ok()
+                .transpose()?
+                .flatten()
+                .context("the network hasn't confirmed the claim yet; it may still arrive")?;
 
             match finalised.finalize.any_reject() {
                 None => Ok(finalised.final_fee),
@@ -304,6 +347,12 @@ impl OotleWallet {
                     return Ok(fee);
                 }
                 fee = result.required_fees();
+                anyhow::ensure!(
+                    fee <= SEND_FEE_CAP,
+                    "the network asked for a fee of {} TARI, more than Clew allows ({} TARI), so it won't send",
+                    tari(fee),
+                    tari(SEND_FEE_CAP)
+                );
                 verified = true;
             }
             anyhow::bail!("The network fee didn't settle; try again")
@@ -311,8 +360,10 @@ impl OotleWallet {
     }
 
     /// Sends `amount` µT of TARI to `address` privately, paying at most `max_fee` µT (from
-    /// `estimate_send_fee`). Blocks until the network finalises it. Returns the fee charged in µT.
-    pub fn send(&self, address: &str, amount: u64, max_fee: u64) -> anyhow::Result<u64> {
+    /// `estimate_send_fee`). Blocks until the network finalises it, or until it's clear the outcome
+    /// will take longer (then `Pending`: the wallet keeps trying, and it must not be sent again).
+    pub fn send(&self, address: &str, amount: u64, max_fee: u64) -> anyhow::Result<SendOutcome> {
+        anyhow::ensure!(max_fee <= SEND_FEE_CAP, "that fee is more than Clew allows ({} TARI)", tari(SEND_FEE_CAP));
         let output = self.transfer_output(address, amount)?;
         let mut linked = vec![self.account];
         if let Ok(own) = self.sdk.accounts_api().get_account_by_public_key(output.address.account_public_key()) {
@@ -320,21 +371,55 @@ impl OotleWallet {
         }
         self.runtime.block_on(async {
             let (lock, transaction) = self.build_transfer(output, max_fee, false).await?;
+            let id = transaction.calculate_id();
             let mut events = self.notify.subscribe();
-            let id = self
-                .transactions
-                .submit_transaction_with_opts(transaction, Some(TransactionContext::with_accounts(linked)), Some(lock.id()))
-                .await?;
-            // The transaction service now owns the lock and releases it when the transaction resolves.
-            lock.keep_locked();
-            let finalised = tokio::time::timeout(FINALISE_TIMEOUT, wait_for_account_update(&mut events, &id, &self.account))
+            let context = Some(TransactionContext::with_accounts(linked));
+            match self.transactions.submit_transaction_with_opts(transaction, context, Some(lock.id())).await {
+                // The transaction service now owns the lock and releases it when the transaction resolves.
+                Ok(_) => {
+                    lock.keep_locked();
+                },
+                // The wallet stores a transaction before sending it and keeps resubmitting stored ones,
+                // so one that was stored can still go through: its funds stay locked and it's pending.
+                Err(e) => {
+                    if self.is_outstanding(id) {
+                        lock.keep_locked();
+                        return Ok(SendOutcome::Pending);
+                    }
+                    return Err(e.into());
+                },
+            }
+            let waited = tokio::time::timeout(FINALISE_TIMEOUT, wait_for_account_update(&mut events, &id, &self.account))
                 .await
-                .context("the network hasn't confirmed the transfer yet")??;
-            match finalised.finalize.any_reject() {
-                None => Ok(finalised.final_fee),
-                Some(reason) => anyhow::bail!("The transfer was rejected: {reason}"),
+                .ok()
+                .transpose()?
+                .flatten();
+            if let Some(finalised) = waited {
+                return match finalised.finalize.any_reject() {
+                    None => Ok(SendOutcome::Confirmed { fee: finalised.final_fee }),
+                    Some(reason) => anyhow::bail!("The transfer was rejected: {reason}"),
+                };
+            }
+            // Timed out, or events were missed: the stored status decides.
+            let stored = self.sdk.transaction_api().get(id)?;
+            match stored.status {
+                TransactionStatus::Accepted => Ok(SendOutcome::Confirmed { fee: stored.final_fee.unwrap_or(0) }),
+                TransactionStatus::New | TransactionStatus::Pending => Ok(SendOutcome::Pending),
+                status => anyhow::bail!(
+                    "The transfer didn't go through ({}){}",
+                    status.as_key_str(),
+                    stored.invalid_reason.map(|r| format!(": {r}")).unwrap_or_default()
+                ),
             }
         })
+    }
+
+    /// Whether the wallet has `id` stored and will still try to send it.
+    fn is_outstanding(&self, id: tari_ootle_transaction::TransactionId) -> bool {
+        self.sdk
+            .transaction_api()
+            .get(id)
+            .is_ok_and(|t| matches!(t.status, TransactionStatus::New | TransactionStatus::Pending))
     }
 
     fn transfer_output(&self, address: &str, amount: u64) -> anyhow::Result<TransferOutput> {
@@ -438,6 +523,8 @@ impl OotleWallet {
     /// Returns how many new payments the scan found (they count towards the balance once checked,
     /// which happens in the background straight after).
     pub fn refresh(&self) -> anyhow::Result<usize> {
+        // Ootle's account recovery can remove an account it thinks is unused; Clew's must stay.
+        clew_account(&self.sdk)?;
         self.runtime.block_on(async {
             // The scan doesn't depend on the account check, so a failed check doesn't skip it.
             let checked = self.account_monitor.refresh_account(self.account).await;
@@ -466,6 +553,32 @@ struct HistoryEntry {
     transaction_id: Option<String>,
     /// Unix seconds.
     time: i64,
+}
+
+/// The account Clew uses: the one at key index 0, as Ootle's own wallet uses for its default account.
+/// It is made (again) if it's missing.
+fn clew_account(sdk: &Sdk) -> anyhow::Result<AccountWithAddress> {
+    let keys = sdk.key_manager_api().derive_account_address(0)?;
+    let accounts = sdk.accounts_api();
+    if let Some(account) = accounts.get_account_by_public_key(&keys.address.account_key().to_byte_type()).optional()? {
+        return Ok(account);
+    }
+    Ok(accounts.create_account(None, true, keys)?)
+}
+
+/// Identifies a seed without revealing it: a domain-separated hash of its entropy.
+fn seed_id(seed: &CipherSeed) -> String {
+    use blake2::{Blake2b512, Digest};
+    let digest = Blake2b512::new()
+        .chain_update(b"clew.ootle.seed_id.v1")
+        .chain_update(seed.entropy())
+        .finalize();
+    digest[..32].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// µT as TARI, for messages.
+pub(crate) fn tari(micro: u64) -> String {
+    format!("{}.{:06}", micro / 1_000_000, micro % 1_000_000)
 }
 
 /// The seed the Ootle wallet uses on `network`. On mainnet it is the L1 wallet's seed, as in Tari's
@@ -503,11 +616,12 @@ fn seed_for_network(seed: &CipherSeed, network: Network) -> anyhow::Result<Ciphe
 
 /// Waits until `transaction` is finalised and, if it was accepted, until the account monitor has seen
 /// the change to `account`, so balances read afterwards include it. Mirrors Ootle's wallet daemon.
+/// `None` if events were missed (too many at once): the caller then reads the stored status.
 async fn wait_for_account_update(
     events: &mut broadcast::Receiver<WalletEvent>,
     transaction: &tari_ootle_transaction::TransactionId,
     account: &ComponentAddress,
-) -> anyhow::Result<tari_ootle_wallet_sdk::models::TransactionFinalizedEvent> {
+) -> anyhow::Result<Option<tari_ootle_wallet_sdk::models::TransactionFinalizedEvent>> {
     let mut result = None;
     let mut account_seen = false;
     loop {
@@ -518,12 +632,13 @@ async fn wait_for_account_update(
             },
             Ok(WalletEvent::AccountCreatedOnChain(e)) if e.account.component_address == *account => account_seen = true,
             Ok(WalletEvent::AccountChangedOnChain(e)) if e.account_address == *account => account_seen = true,
-            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {},
+            Ok(_) => {},
+            Err(broadcast::error::RecvError::Lagged(_)) => return Ok(None),
             Err(broadcast::error::RecvError::Closed) => anyhow::bail!("the wallet is shutting down"),
         }
         if let Some(r) = &result {
             if r.finalize.result.is_reject() || (r.finalize.result.is_any_accept() && account_seen) {
-                return Ok(result.unwrap());
+                return Ok(result);
             }
         }
     }

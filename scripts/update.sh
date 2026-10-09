@@ -26,6 +26,24 @@ ASSUME_YES=false
 current_tari="$(sed -n 's/^TARI_TAG="\(.*\)"/\1/p' scripts/build-ffi.sh)"
 current_arti="$(sed -n 's/^ARTI_VERSION="\(.*\)"/\1/p' scripts/build-arti.sh)"
 
+# Outside (crates.io) packages in lockfile $2 that aren't in lockfile $1. Path crates (Tari's own,
+# vendored) have no source and aren't listed.
+new_packages() {
+  python3 - "$1" "$2" <<'PY'
+import re, sys
+def packages(path):
+    found = set()
+    for block in open(path).read().split("[[package]]")[1:]:
+        name = re.search(r'^name = "(.*)"', block, re.M)
+        version = re.search(r'^version = "(.*)"', block, re.M)
+        if name and version and re.search(r'^source = ', block, re.M):
+            found.add(name[1] + " " + version[1])
+    return found
+for package in sorted(packages(sys.argv[2]) - packages(sys.argv[1])):
+    print(package)
+PY
+}
+
 # "a < b" for versions like v6.1.0 / 2.6.0
 newer() { python3 -c '
 import re, sys
@@ -82,10 +100,11 @@ rollback() {
   cp "$BACKUP/build-ffi.sh" "$BACKUP/build-arti.sh" scripts/
   cp "$BACKUP/project.yml" .
   cp "$BACKUP/Cargo.lock" rust/clew-core/
+  git -C "$ROOT" reset -q -- patches 2>/dev/null || true   # undo the patch rename's staging
   if $tari_moved; then
     git -C "$TARI" reset -q --hard
     git -C "$TARI" checkout -q "$current_tari"
-    git -C "$TARI" apply -N "patches/tari-$current_tari-clew.patch"
+    git -C "$TARI" apply -N "$ROOT/patches/tari-$current_tari-clew.patch"
   fi
   exit 1
 }
@@ -93,7 +112,7 @@ trap rollback ERR INT
 
 # --- Tari ---------------------------------------------------------------------------------
 if $update_tari; then
-  saved="patches/tari-$current_tari-clew.patch"
+  saved="$ROOT/patches/tari-$current_tari-clew.patch"
   # The vendor folder must hold exactly Clew's saved patch, so resetting it loses nothing.
   if ! diff -q <(git -C "$TARI" diff -- . ':(exclude)Cargo.lock' ':(exclude)base_layer/wallet_ffi/wallet.h') \
        "$saved" > /dev/null; then
@@ -112,11 +131,24 @@ if $update_tari; then
   fi
   git mv -f "$saved" "patches/tari-$latest_tari-clew.patch" 2>/dev/null \
     || mv "$saved" "patches/tari-$latest_tari-clew.patch"
-  sed -i '' "s/^TARI_TAG=\".*\"/TARI_TAG=\"$latest_tari\"/" scripts/build-ffi.sh
+  # Pin the release by commit too: a tag can be moved later.
+  latest_commit="$(git -C "$TARI" rev-parse HEAD)"
+  sed -i '' "s/^TARI_TAG=\".*\"/TARI_TAG=\"$latest_tari\"/; s/^TARI_COMMIT=\".*\"/TARI_COMMIT=\"$latest_commit\"/" \
+    scripts/build-ffi.sh
   # Let clew-core's lockfile follow the new Tari crates, changing as little else as it can.
-  git -C "$TARI" apply -N "patches/tari-$latest_tari-clew.patch"
+  git -C "$TARI" apply -N "$ROOT/patches/tari-$latest_tari-clew.patch"
   cargo update --manifest-path "$TARI/Cargo.toml" --workspace --offline --quiet
   cargo metadata --manifest-path rust/clew-core/Cargo.toml --format-version 1 > /dev/null
+  # Outside crates the new release brings in get built into Clew, so show them before going on.
+  added="$(new_packages "$BACKUP/Cargo.lock" rust/clew-core/Cargo.lock)"
+  if [ -n "$added" ]; then
+    echo "Tari $latest_tari brings in outside packages Clew hasn't built before:"
+    echo "$added" | sed 's/^/   /'
+    if ! $ASSUME_YES; then
+      read -r -p "Build them into Clew? [y/N] " answer
+      [[ "$answer" =~ ^[Yy]$ ]] || { echo "Stopping."; false; }
+    fi
+  fi
   echo "Building Tari's wallet libraries, mainnet and testnet (this takes a while)…"
   scripts/build-ffi.sh > build/update-ffi.log 2>&1 \
     || { tail -20 build/update-ffi.log; false; }

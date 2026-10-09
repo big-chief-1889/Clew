@@ -357,8 +357,10 @@ struct TariSendView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var recipient = ""
     @State private var amountText = ""
-    @State private var fee: MicroTari?
+    /// The fee and the address and amount it was worked out for.
+    @State private var quote: (fee: MicroTari, key: String)?
     @State private var feeProblem: String?
+    @State private var pendingNotice = false
     @State private var checkingFee = false
     @State private var reviewing = false
     @State private var sending = false
@@ -373,6 +375,9 @@ struct TariSendView: View {
         trimmedRecipient.hasPrefix(Config.ootleAddressPrefix) && trimmedRecipient.count > 40
     }
     private var isOwnAddress: Bool { trimmedRecipient == model.ootleAddress }
+    private var quoteKey: String { "\(trimmedRecipient)|\(amount ?? 0)" }
+    /// Only a fee worked out for exactly this address and amount.
+    private var fee: MicroTari? { quote.flatMap { $0.key == quoteKey ? $0.fee : nil } }
     private var total: MicroTari? {
         guard let amount, let fee else { return nil }
         let (sum, overflow) = amount.addingReportingOverflow(fee)
@@ -455,7 +460,7 @@ struct TariSendView: View {
         .onAppear { walletID = model.ootleWallet }
         // The fee depends on the amount and the funds it spends, so it's worked out again whenever
         // either changes (after a short pause in typing).
-        .task(id: "\(trimmedRecipient)|\(amount ?? 0)") { await updateFee() }
+        .task(id: quoteKey) { await updateFee() }
         .confirmationDialog("Send \(XTM.format(amount ?? 0)) tTARI?", isPresented: $reviewing, titleVisibility: .visible) {
             Button("Send") { Task { await send() } }
             Button("Cancel", role: .cancel) {}
@@ -468,10 +473,16 @@ struct TariSendView: View {
         .alert("Couldn't send", isPresented: .init(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("OK") {}
         } message: { Text(error ?? "") }
+        .alert("Sent, not confirmed yet", isPresented: $pendingNotice) {
+            Button("OK") { dismiss() }
+        } message: {
+            Text("The network hasn't confirmed this payment yet. Clew keeps trying it and its TARI stays set aside, so don't send it again: it will show in your history once it goes through.")
+        }
     }
 
     private func updateFee() async {
-        fee = nil
+        let key = quoteKey
+        quote = nil
         feeProblem = nil
         guard addressLooksValid, !isOwnAddress, let amount, amount <= model.tariBalance else { return }
         try? await Task.sleep(for: .milliseconds(600))
@@ -481,7 +492,7 @@ struct TariSendView: View {
         do {
             let estimate = try await model.estimateTariFee(to: trimmedRecipient, amount: amount)
             guard !Task.isCancelled else { return }
-            fee = estimate
+            quote = (estimate, key)
         } catch {
             guard !Task.isCancelled else { return }
             feeProblem = error.localizedDescription
@@ -495,9 +506,11 @@ struct TariSendView: View {
         sending = true
         defer { sending = false }
         do {
-            try await model.sendTari(amount: amount, to: trimmedRecipient, maxFee: fee, from: walletID,
-                                     password: password)
-            dismiss()
+            switch try await model.sendTari(amount: amount, to: trimmedRecipient, maxFee: fee, from: walletID,
+                                            password: password) {
+            case .confirmed: dismiss()
+            case .pending: pendingNotice = true
+            }
         } catch is AppModel.PasswordNeeded {
             askingPassword = true
         } catch {
@@ -550,8 +563,9 @@ struct MoveToTariView: View {
         let (sum, overflow) = amount.addingReportingOverflow(fee)
         return overflow ? nil : sum
     }
+    private var belowMinimum: Bool { amount.map { $0 < OotleCore.minimumMove } ?? false }
     private var canMove: Bool {
-        model.canMoveToTari && understandsOneWay && understandsWait && !moving
+        model.canMoveToTari && understandsOneWay && understandsWait && !moving && !belowMinimum
             && total.map { $0 <= model.balance.available } == true
     }
 
@@ -587,6 +601,8 @@ struct MoveToTariView: View {
                     }
                     if !amountText.trimmingCharacters(in: .whitespaces).isEmpty && amount == nil {
                         hint("Enter just a number, like \(XTM.example). No thousands separators.", warn: true)
+                    } else if belowMinimum {
+                        hint("The smallest move is \(XTM.format(OotleCore.minimumMove)) XTM, so claiming it always covers its fee.", warn: true)
                     } else {
                         hint("Available: \(XTM.format(model.balance.available)) XTM", warn: false)
                     }
@@ -594,7 +610,7 @@ struct MoveToTariView: View {
 
                 if let fee, let total {
                     VStack(spacing: 4) {
-                        row("Network fee", XTM.format(fee))
+                        row("Network fee (about)", XTM.format(fee))
                         row("Total", XTM.format(total)).fontWeight(.semibold)
                     }
                     .font(.callout)

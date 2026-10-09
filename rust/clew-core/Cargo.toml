@@ -14,6 +14,7 @@ minotari_wallet_ffi = { path = "../../vendor/tari/base_layer/wallet_ffi" }
 # The L1 wallet itself, for burning to Ootle (the FFI has no burn).
 minotari_wallet = { path = "../../vendor/tari/base_layer/wallet" }
 tari_sidechain = "6.1.0"
+tari_common = "6.1.0"
 tari_transaction_components = "6.1.0"
 # L2: the Ootle client.
 ootle-rs = { path = "../../vendor/tari-ootle/crates/wallet/ootle-rs" }

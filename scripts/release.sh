@@ -16,9 +16,23 @@ STAGE="$OUT/stage"
 ARTI_VERSION="$(sed -n 's/^ARTI_VERSION="\(.*\)"/\1/p' scripts/build-arti.sh)"
 VERSION="$(sed -n 's/.*MARKETING_VERSION: "\(.*\)".*/\1/p' project.yml)"
 
-# Things that must not appear anywhere in the release. Extra ones (your name, email) can be added
-# with CLEW_RELEASE_FORBIDDEN="Name|email@example.com".
+# Things that must not appear anywhere in the release: your home folder and username, this folder,
+# your Mac account's full name, your git email and name, and your Apple Development certificate's
+# name and team. More can be added with CLEW_RELEASE_FORBIDDEN="Name|email@example.com".
 FORBIDDEN="$HOME|/Users/$USER|$USER"
+forbid() { # adds a literal value (3+ characters, not Clew's own identity)
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in ""|clew|clew@localhost) return ;; esac
+  [ "${#1}" -ge 3 ] || return 0
+  FORBIDDEN="$FORBIDDEN|$(printf '%s' "$1" | sed 's/[][\.^$*+?(){}|]/\\&/g')"
+}
+forbid "$ROOT"
+forbid "$(id -F 2>/dev/null || true)"
+forbid "$(git config --global user.email 2>/dev/null || true)"
+forbid "$(git config --global user.name 2>/dev/null || true)"
+certificate="$(security find-certificate -c "Apple Development" -p 2>/dev/null \
+  | openssl x509 -noout -subject 2>/dev/null || true)"
+forbid "$(printf '%s' "$certificate" | sed -n 's/.*OU=\([A-Z0-9]*\).*/\1/p')"
+forbid "$(printf '%s' "$certificate" | sed -n 's/.*CN=Apple Development: \([^(]*\) (.*/\1/p' | sed 's/ *$//')"
 [ -n "${CLEW_RELEASE_FORBIDDEN:-}" ] && FORBIDDEN="$FORBIDDEN|$CLEW_RELEASE_FORBIDDEN"
 
 # Remap paths in compiled code: the repo becomes /clew, the rest of the home folder /build.
@@ -30,14 +44,15 @@ export CXXFLAGS="$CFLAGS"
 rm -rf "$OUT" && mkdir -p "$STAGE"
 
 echo "Building the wallet libraries (Tari + Ootle, mainnet and testnet) with remapped paths (a while)…"
+# Build outside the home folder: some dependencies (OpenSSL) compile their build folder in as text.
 for network in mainnet esme; do
-  CARGO_TARGET_DIR="$ROOT/build/release-cargo-$network" scripts/build-ffi.sh "$network" >> "$OUT/ffi.log" 2>&1 \
+  CARGO_TARGET_DIR="/private/tmp/clew-release-cargo-$network" scripts/build-ffi.sh "$network" >> "$OUT/ffi.log" 2>&1 \
     || { tail -20 "$OUT/ffi.log"; exit 1; }
 done
 cp -R Frameworks/TariFFI Frameworks/TariFFI-testnet "$STAGE/"
 
 echo "Building Arti $ARTI_VERSION with remapped paths (a few minutes)…"
-CARGO_TARGET_DIR="$ROOT/build/release-arti-target" cargo install arti --version "$ARTI_VERSION" --locked \
+CARGO_TARGET_DIR="/private/tmp/clew-release-arti-target" cargo install arti --version "$ARTI_VERSION" --locked \
   --root "$ROOT/build/release-arti" --force > "$OUT/arti.log" 2>&1 || { tail -20 "$OUT/arti.log"; exit 1; }
 
 echo "Building Clew $VERSION…"
@@ -55,6 +70,13 @@ scripts/generate-project.sh   # put the normal (signed) project back for install
 APP="$OUT/Clew.app"
 TESTNET_APP="$APP/Contents/Helpers/Clew Testnet.app"
 ditto "$ROOT/build/release-derived/Build/Products/Release/Clew.app" "$APP"
+# Xcode records the build Mac's macOS and Xcode versions in Info.plist; they say nothing a user needs.
+for app in "$TESTNET_APP" "$APP"; do
+  for key in BuildMachineOSBuild DTCompiler DTPlatformBuild DTPlatformName DTPlatformVersion DTSDKBuild \
+             DTSDKName DTXcode DTXcodeBuild; do
+    /usr/libexec/PlistBuddy -c "Delete :$key" "$app/Contents/Info.plist" 2>/dev/null || true
+  done
+done
 # Swap in the remapped Arti, then sign everything ad-hoc from the inside out: each Tor helper, then
 # Clew Testnet, then Clew around it.
 for app in "$TESTNET_APP" "$APP"; do
@@ -77,6 +99,11 @@ while IFS= read -r -d '' file; do
     found=1
   fi
 done < <(find "$APP" -type f -print0)
+while IFS= read -r -d '' file; do
+  if file -b "$file" | grep -q 'Mach-O' && codesign -dvv "$file" 2>&1 | grep -qE 'Authority=|TeamIdentifier=[A-Z0-9]'; then
+    echo "  the signature of ${file#$OUT/} contains a certificate or team"; found=1
+  fi
+done < <(find "$APP" -type f -perm +111 -print0)
 for app in "$APP" "$TESTNET_APP"; do
   if codesign -dvv "$app" 2>&1 | grep -qE 'Authority=|TeamIdentifier=[A-Z0-9]'; then
     echo "  the signature of ${app#$OUT/} contains a certificate or team"; found=1
@@ -85,6 +112,9 @@ done
 [ "$found" = 0 ] || { echo "Release NOT made: remove the items above first." >&2; exit 1; }
 echo "  clean"
 
+# Every file gets the release commit's time, so the zip doesn't say when or how long the build ran.
+STAMP="$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M.%S)"
+find "$APP" -exec env TZ=UTC touch -h -t "$STAMP" {} +
 # Zip timestamps have no time zone, so write them in UTC rather than local time.
 ZIP="Clew-$VERSION-mac.zip"
 (cd "$OUT" && TZ=UTC ditto -c -k --norsrc --noextattr --noqtn --keepParent Clew.app "$ZIP" && shasum -a 256 "$ZIP" > SHA256SUMS.txt)

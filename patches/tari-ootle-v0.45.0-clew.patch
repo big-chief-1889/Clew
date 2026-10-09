@@ -50,10 +50,10 @@ index 7994d3d..2cd9f09 100644
  pub mod sse;
 diff --git a/clients/tari_indexer_client/src/proxy.rs b/clients/tari_indexer_client/src/proxy.rs
 new file mode 100644
-index 0000000..a225ea1
+index 0000000..099f6c7
 --- /dev/null
 +++ b/clients/tari_indexer_client/src/proxy.rs
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,56 @@
 +// Copyright 2026 The Tari Project
 +// SPDX-License-Identifier: BSD-3-Clause
 +
@@ -61,17 +61,33 @@ index 0000000..a225ea1
 +
 +use std::{sync::RwLock, time::Duration};
 +
-+/// Proxy for indexer clients, e.g. `socks5h://127.0.0.1:9150` for Tor. `None` connects directly.
-+static HTTP_PROXY: RwLock<Option<String>> = RwLock::new(None);
++/// Proxy for indexer clients, e.g. `socks5h://127.0.0.1:9150` for Tor. `None` until the host app sets
++/// a route: clients use a dead proxy until then, so nothing connects directly by accident.
++/// `Some(None)` is a direct connection the host app chose.
++static HTTP_PROXY: RwLock<Option<Option<String>>> = RwLock::new(None);
++
++/// Where clients connect when there is no usable route: a closed local port.
++const DEAD_PROXY: &str = "socks5h://127.0.0.1:1";
++
++#[derive(Debug, thiserror::Error)]
++pub enum ProxyError {
++    #[error("only socks5h:// proxies are supported, so DNS lookups go through the proxy too")]
++    NotSocks5h,
++    #[error(transparent)]
++    Invalid(#[from] reqwest::Error),
++}
 +
 +/// Routes indexer clients created after this call through `proxy` (or directly when `None`).
 +/// Clients keep the route they were created with, so reconnect after changing it. With a proxy
 +/// set, requests that can't reach it fail rather than connecting directly.
-+pub fn set_http_proxy(proxy: Option<String>) -> Result<(), reqwest::Error> {
++pub fn set_http_proxy(proxy: Option<String>) -> Result<(), ProxyError> {
 +    if let Some(proxy) = &proxy {
++        if !proxy.starts_with("socks5h://") {
++            return Err(ProxyError::NotSocks5h);
++        }
 +        reqwest::Proxy::all(proxy)?;
 +    }
-+    *HTTP_PROXY.write().unwrap_or_else(|e| e.into_inner()) = proxy;
++    *HTTP_PROXY.write().unwrap_or_else(|e| e.into_inner()) = Some(proxy);
 +    Ok(())
 +}
 +
@@ -82,10 +98,10 @@ index 0000000..a225ea1
 +/// Applies the configured proxy to a client builder. If the setting can't be read, uses a dead
 +/// proxy: fail closed rather than connect directly. Call it after any `connect_timeout`.
 +pub(crate) fn apply(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-+    let proxy = HTTP_PROXY
-+        .read()
-+        .map(|p| p.clone())
-+        .unwrap_or_else(|_| Some("socks5h://127.0.0.1:1".to_string()));
++    let proxy = match HTTP_PROXY.read().map(|p| p.clone()) {
++        Ok(Some(route)) => route,
++        _ => Some(DEAD_PROXY.to_string()),
++    };
 +    match proxy {
 +        // Validated in set_http_proxy; an explicit proxy also turns off system proxy detection.
 +        Some(proxy) => builder

@@ -27,8 +27,11 @@ osascript -e 'tell application id "app.clew.wallet" to quit' 2>/dev/null || true
 osascript -e 'tell application id "app.clew.wallet.testnet" to quit' 2>/dev/null || true
 sleep 1
 
+# Copy first, then swap: if the copy fails, the installed Clew is still there.
+rm -rf /Applications/.Clew-new.app
+ditto "$APP" /Applications/.Clew-new.app
 rm -rf /Applications/Clew.app
-ditto "$APP" /Applications/Clew.app
+mv /Applications/.Clew-new.app /Applications/Clew.app
 # Copies of Clew left in build/ (same app ID) can hide the installed one from the Dock's Apps view
 # and Launchpad, so they're removed and forgotten once installed.
 rm -rf build/DerivedData/Build/Products/Release/*.app
